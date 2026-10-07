@@ -810,7 +810,10 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 }
 
 func schedulerQuotaObservation(provider string, quota QuotaState) pluginapi.SchedulerQuotaObservation {
-	observation := pluginapi.SchedulerQuotaObservation{ObservedAt: quota.ObservedAt}
+	observation := pluginapi.SchedulerQuotaObservation{
+		ObservedAt: quota.ObservedAt,
+		Signals:    make(map[string]string),
+	}
 	if len(quota.Signals) > 0 {
 		headers := make(http.Header, len(quota.Signals))
 		for key, value := range quota.Signals {

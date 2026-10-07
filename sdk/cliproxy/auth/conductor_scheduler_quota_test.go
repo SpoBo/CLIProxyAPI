@@ -193,3 +193,17 @@ func TestSchedulerAuthCandidatesExposePriorityAndWeightAsTypedFields(t *testing.
 		t.Fatalf("candidate.Attributes = %#v, want nil", candidate.Attributes)
 	}
 }
+
+func TestSchedulerAuthCandidatesEmitNonNullQuotaSignals(t *testing.T) {
+	candidate := schedulerAuthCandidates([]*Auth{{ID: "auth-empty-quota", Provider: "claude"}}, "claude-opus")[0]
+	if candidate.Quota.Signals == nil {
+		t.Fatal("candidate.Quota.Signals is nil; strict scheduler wire decoders reject null")
+	}
+	raw, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("json.Marshal(candidate) error = %v", err)
+	}
+	if strings.Contains(string(raw), `"Signals":null`) {
+		t.Fatalf("serialized scheduler candidate contains null quota signals: %s", raw)
+	}
+}
