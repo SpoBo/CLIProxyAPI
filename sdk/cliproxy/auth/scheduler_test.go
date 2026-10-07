@@ -1222,7 +1222,7 @@ func TestManagerPluginSchedulerAcrossPrioritiesMixedUnhandledFallsBackToHighestP
 	}
 }
 
-func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
+func TestManagerSelectAuthByKindRejectsPluginAPIKey(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["codex"] = schedulerTestExecutor{}
 	for _, candidate := range []*Auth{
@@ -1241,11 +1241,8 @@ func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
 	manager.SetPluginScheduler(scheduler)
 
 	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
-	if errSelect != nil {
-		t.Fatalf("SelectAuthByKind() error = %v", errSelect)
-	}
-	if selected == nil || selected.ID != "codex-oauth" {
-		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
+	if errSelect == nil || selected != nil {
+		t.Fatalf("SelectAuthByKind() = %#v, %v; want invalid scheduler auth error", selected, errSelect)
 	}
 	if scheduler.calls != 1 {
 		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
@@ -1748,45 +1745,43 @@ func TestManagerPluginSchedulerErrorStopsPick(t *testing.T) {
 	}
 }
 
-func TestManagerPluginSchedulerFallsBackWhenUnhandledOrUnknown(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		resp    pluginapi.SchedulerPickResponse
-		handled bool
-	}{
-		{
-			name:    "unhandled",
-			resp:    pluginapi.SchedulerPickResponse{Handled: false},
-			handled: false,
-		},
-		{
-			name:    "unknown auth id",
-			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"},
-			handled: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+func TestManagerPluginSchedulerFallsBackWhenUnhandled(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	manager.SetPluginScheduler(&fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: false},
+		handled: false,
+	})
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil || got == nil || got.ID != "auth-a" {
+		t.Fatalf("pickNext() = %#v, %v; want unchanged native auth-a fallback", got, errPick)
+	}
+}
+
+func TestManagerPluginSchedulerInvalidAuthIDStopsPick(t *testing.T) {
+	for _, authID := range []string{"missing", " auth-a ", "   "} {
+		t.Run(authID, func(t *testing.T) {
 			manager := NewManager(nil, &FillFirstSelector{}, nil)
 			manager.executors["gemini"] = schedulerTestExecutor{}
-			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
-				t.Fatalf("Register(auth-b) error = %v", errRegister)
-			}
 			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
 				t.Fatalf("Register(auth-a) error = %v", errRegister)
 			}
-
-			scheduler := &fakePluginScheduler{resp: tc.resp, handled: tc.handled}
-			manager.SetPluginScheduler(scheduler)
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID},
+				handled: true,
+			})
 
 			got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-			if errPick != nil {
-				t.Fatalf("pickNext() error = %v", errPick)
-			}
-			if got == nil {
-				t.Fatalf("pickNext() auth = nil")
-			}
-			if got.ID != "auth-a" {
-				t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, "auth-a")
+			if errPick == nil || got != nil {
+				t.Fatalf("pickNext() = %#v, %v; want terminal invalid scheduler auth error", got, errPick)
 			}
 		})
 	}

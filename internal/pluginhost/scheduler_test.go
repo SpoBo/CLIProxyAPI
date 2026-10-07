@@ -250,10 +250,6 @@ func TestHostPickAuthInvalidResponseFallsBack(t *testing.T) {
 		resp pluginapi.SchedulerPickResponse
 	}{
 		{
-			name: "unknown auth id",
-			resp: pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"},
-		},
-		{
 			name: "unknown delegate",
 			resp: pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: "unknown"},
 		},
@@ -278,6 +274,24 @@ func TestHostPickAuthInvalidResponseFallsBack(t *testing.T) {
 			}
 			if handled {
 				t.Fatal("PickAuth() handled = true, want false")
+			}
+		})
+	}
+}
+
+func TestHostPickAuthInvalidAuthIDRejectsWithoutFallback(t *testing.T) {
+	for _, authID := range []string{"missing", " auth-1 ", "   "} {
+		t.Run(authID, func(t *testing.T) {
+			host := newHostWithRecords(capabilityRecord{
+				id: "scheduler",
+				plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+					return pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID}, nil
+				})}},
+			})
+
+			_, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+			if !handled || errPick == nil {
+				t.Fatalf("PickAuth() handled/error = %v/%v, want terminal invalid-auth error", handled, errPick)
 			}
 		})
 	}

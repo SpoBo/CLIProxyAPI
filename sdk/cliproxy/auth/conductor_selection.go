@@ -880,7 +880,6 @@ func schedulerOptions(opts cliproxyexecutor.Options) pluginapi.SchedulerOptions 
 }
 
 func pickSchedulerAuthByID(candidates []*Auth, authID string) *Auth {
-	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return nil
 	}
@@ -966,8 +965,14 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		}
 		return nil, true, &Error{Code: rejectCode, Message: rejectMessage}
 	}
-	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-		return selected, true, nil
+	if resp.AuthID != "" {
+		if resp.AuthID != strings.TrimSpace(resp.AuthID) {
+			return nil, true, &Error{Code: "scheduler_invalid_auth", Message: "scheduler returned a non-canonical credential identifier"}
+		}
+		if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
+			return selected, true, nil
+		}
+		return nil, true, &Error{Code: "scheduler_invalid_auth", Message: "scheduler returned an unavailable credential identifier"}
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)

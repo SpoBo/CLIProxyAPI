@@ -36,9 +36,13 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
+	reportedAuthID := resp.AuthID != ""
 	resp, valid, reason := normalizeSchedulerResponse(resp, req)
 	if !valid {
 		log.WithField("plugin_id", record.id).Warnf("pluginhost: scheduler returned invalid response: %s", reason)
+		if reportedAuthID {
+			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("scheduler %q returned invalid auth selection: %s", record.id, reason)
+		}
 		if required != "" {
 			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("required scheduler %q returned invalid response: %s", required, reason)
 		}
@@ -109,7 +113,6 @@ func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req p
 }
 
 func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, string) {
-	resp.AuthID = strings.TrimSpace(resp.AuthID)
 	resp.DelegateBuiltin = strings.TrimSpace(resp.DelegateBuiltin)
 	resp.RejectCode = strings.TrimSpace(resp.RejectCode)
 	resp.RejectReason = strings.TrimSpace(resp.RejectReason)
@@ -130,6 +133,9 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 		return pluginapi.SchedulerPickResponse{}, false, "missing auth id or delegate"
 	}
 	if hasAuthID {
+		if resp.AuthID != strings.TrimSpace(resp.AuthID) {
+			return pluginapi.SchedulerPickResponse{}, false, "non-canonical auth id"
+		}
 		if !schedulerCandidateExists(req.Candidates, resp.AuthID) {
 			return pluginapi.SchedulerPickResponse{}, false, "unknown auth id"
 		}
@@ -143,7 +149,7 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 
 func schedulerCandidateExists(candidates []pluginapi.SchedulerAuthCandidate, authID string) bool {
 	for _, candidate := range candidates {
-		if strings.TrimSpace(candidate.ID) == authID {
+		if candidate.ID == authID {
 			return true
 		}
 	}
