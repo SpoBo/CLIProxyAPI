@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,9 +18,10 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
 
-func TestHostApplyConfigActiveRequiredSchedulerIdenticalConfigIsExactNoop(t *testing.T) {
+func TestHostApplyConfigActiveRequiredSchedulerEqualBoundaryRefreshesOnlyRuntimeConfig(t *testing.T) {
 	pluginsDir := makePluginDir(t, "quota-policy")
 	initialCfg := requiredBoundaryConfig(t, pluginsDir, "")
 	equivalentCfg := requiredBoundaryConfig(t, pluginsDir, `
@@ -29,6 +31,117 @@ func TestHostApplyConfigActiveRequiredSchedulerIdenticalConfigIsExactNoop(t *tes
       - name: primary
         accounts: [first, second]
 `)
+	equivalentCfg.ProxyURL = " http://new-proxy.local "
+	equivalentCfg.AuthDir = " /new/auth/dir "
+	equivalentCfg.ForceModelPrefix = true
+	equivalentCfg.OAuthModelAlias = map[string][]config.OAuthModelAlias{
+		"Runtime-Provider": {{Name: "upstream-model", Alias: "alias-model"}},
+	}
+	equivalentCfg.OAuthExcludedModels = map[string][]string{
+		"Runtime-Provider": {"hidden-model"},
+	}
+	var registerCalls atomic.Int32
+	var reconfigureCalls atomic.Int32
+	var operationHost pluginapi.HostConfigSummary
+	plugin := validTestPlugin("quota-policy")
+	plugin.Capabilities.Scheduler = schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+		return pluginapi.SchedulerPickResponse{Handled: true, Reject: true, RejectCode: "policy", RejectReason: "required policy"}, nil
+	})
+	plugin.Capabilities.AuthProvider = fakeAuthProvider{
+		identifier: "runtime-provider",
+	}
+	client := &lifecycleTestClient{call: func(_ context.Context, method string, raw []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			registerCalls.Add(1)
+			return lifecycleRegistrationResult(plugin)
+		case pluginabi.MethodPluginReconfigure:
+			reconfigureCalls.Add(1)
+			return nil, fmt.Errorf("required scheduler must not be reconfigured")
+		case pluginabi.MethodAuthIdentifier:
+			return marshalRPCResult(rpcIdentifierResponse{Identifier: "runtime-provider"})
+		case pluginabi.MethodAuthLoginStart:
+			var req rpcAuthLoginStartRequest
+			if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			operationHost = req.Host
+			return marshalRPCResult(pluginapi.AuthLoginStartResponse{Provider: req.Provider, State: "runtime-state"})
+		default:
+			return nil, fmt.Errorf("unexpected plugin method %s", method)
+		}
+	}}
+	loader := &sequencePluginLoader{clients: []pluginClient{client}}
+	h := NewForTest(loader)
+	t.Cleanup(h.ShutdownAll)
+
+	if errApply := h.ApplyConfig(context.Background(), initialCfg); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	activeSnapshot := h.Snapshot()
+	h.mu.Lock()
+	activeLoaded := h.loaded["quota-policy"]
+	activeClient := activeLoaded.client
+	h.managementRoutes["GET /runtime-route"] = managementRouteRecord{pluginID: "quota-policy"}
+	h.resourceRoutes["GET /runtime-resource"] = resourceRouteRecord{pluginID: "quota-policy"}
+	h.mu.Unlock()
+
+	if errApply := h.ApplyConfig(context.Background(), equivalentCfg); errApply != nil {
+		t.Fatalf("equal-boundary ApplyConfig() error = %v", errApply)
+	}
+	if h.Snapshot() != activeSnapshot {
+		t.Fatal("equal-boundary config replaced the active snapshot")
+	}
+	h.mu.Lock()
+	currentLoaded := h.loaded["quota-policy"]
+	loadedUnchanged := currentLoaded == activeLoaded
+	clientUnchanged := currentLoaded != nil && currentLoaded.client == activeClient
+	runtimeRefreshed := h.runtimeConfig == equivalentCfg
+	routesUnchanged := len(h.managementRoutes) == 1 && len(h.resourceRoutes) == 1 &&
+		h.managementRoutes["GET /runtime-route"].pluginID == "quota-policy" &&
+		h.resourceRoutes["GET /runtime-resource"].pluginID == "quota-policy"
+	h.mu.Unlock()
+	if !loadedUnchanged || !clientUnchanged {
+		t.Fatal("equal-boundary config replaced the active plugin instance or client")
+	}
+	if !runtimeRefreshed {
+		t.Fatal("equal-boundary config did not refresh the active runtime config")
+	}
+	if !routesUnchanged {
+		t.Fatal("equal-boundary config replaced active plugin routes")
+	}
+
+	summary := h.hostConfigSummary()
+	if summary.ProxyURL != "http://new-proxy.local" || summary.AuthDir != "/new/auth/dir" || !summary.ForceModelPrefix {
+		t.Fatalf("hostConfigSummary() = %#v, want refreshed runtime fields", summary)
+	}
+	if len(summary.OAuthModelAlias["runtime-provider"]) != 1 || summary.OAuthModelAlias["runtime-provider"][0].Alias != "alias-model" {
+		t.Fatalf("hostConfigSummary() aliases = %#v, want refreshed alias", summary.OAuthModelAlias)
+	}
+	if got := summary.ExcludedModels["runtime-provider"]; len(got) != 1 || got[0] != "hidden-model" {
+		t.Fatalf("hostConfigSummary() exclusions = %#v, want refreshed exclusion", summary.ExcludedModels)
+	}
+	resp, handled, errStart := h.StartLogin(context.Background(), "runtime-provider", "http://localhost/callback")
+	if errStart != nil || !handled || resp.State != "runtime-state" {
+		t.Fatalf("StartLogin() = (%#v, %t, %v), want refreshed runtime operation", resp, handled, errStart)
+	}
+	if operationHost.ProxyURL != summary.ProxyURL || operationHost.AuthDir != summary.AuthDir || !operationHost.ForceModelPrefix {
+		t.Fatalf("StartLogin() host = %#v, want refreshed summary %#v", operationHost, summary)
+	}
+	if got := registerCalls.Load(); got != 1 {
+		t.Fatalf("plugin.register calls = %d, want 1", got)
+	}
+	if got := reconfigureCalls.Load(); got != 0 {
+		t.Fatalf("plugin.reconfigure calls = %d, want 0", got)
+	}
+	if loader.calls != 1 {
+		t.Fatalf("loader calls = %d, want 1", loader.calls)
+	}
+}
+
+func TestHostApplyConfigActiveRequiredSchedulerRejectsInvalidRuntimeBeforeEqualBoundary(t *testing.T) {
+	pluginsDir := makePluginDir(t, "quota-policy")
+	initialCfg := requiredBoundaryConfig(t, pluginsDir, "")
 	var registerCalls atomic.Int32
 	var reconfigureCalls atomic.Int32
 	client := requiredBoundaryClient(&registerCalls, &reconfigureCalls)
@@ -43,22 +156,27 @@ func TestHostApplyConfigActiveRequiredSchedulerIdenticalConfigIsExactNoop(t *tes
 	h.mu.Lock()
 	activeLoaded := h.loaded["quota-policy"]
 	activeRuntimeConfig := h.runtimeConfig
+	h.managementRoutes["GET /validation-route"] = managementRouteRecord{pluginID: "quota-policy"}
+	h.resourceRoutes["GET /validation-resource"] = resourceRouteRecord{pluginID: "quota-policy"}
 	h.mu.Unlock()
 
-	if errApply := h.ApplyConfig(context.Background(), equivalentCfg); errApply != nil {
-		t.Fatalf("identical ApplyConfig() error = %v", errApply)
+	invalid := requiredBoundaryConfig(t, pluginsDir, "")
+	invalid.Home.Enabled = true
+	if errApply := h.ApplyConfig(context.Background(), invalid); errApply == nil || !strings.Contains(errApply.Error(), "incompatible with Home") {
+		t.Fatalf("invalid equal-boundary ApplyConfig() error = %v, want Home incompatibility", errApply)
 	}
 	if h.Snapshot() != activeSnapshot {
-		t.Fatal("identical required config replaced the active snapshot")
+		t.Fatal("invalid equal-boundary config replaced the active snapshot")
 	}
 	h.mu.Lock()
-	if h.loaded["quota-policy"] != activeLoaded {
-		t.Fatal("identical required config replaced the active plugin instance")
-	}
-	if h.runtimeConfig != activeRuntimeConfig {
-		t.Fatal("identical required config replaced the active runtime config")
-	}
+	stateUnchanged := h.loaded["quota-policy"] == activeLoaded && h.runtimeConfig == activeRuntimeConfig &&
+		len(h.managementRoutes) == 1 && len(h.resourceRoutes) == 1 &&
+		h.managementRoutes["GET /validation-route"].pluginID == "quota-policy" &&
+		h.resourceRoutes["GET /validation-resource"].pluginID == "quota-policy"
 	h.mu.Unlock()
+	if !stateUnchanged {
+		t.Fatal("invalid equal-boundary config mutated active plugin/runtime state")
+	}
 	if got := registerCalls.Load(); got != 1 {
 		t.Fatalf("plugin.register calls = %d, want 1", got)
 	}
@@ -139,6 +257,16 @@ func TestHostApplyConfigActiveRequiredSchedulerMutationsRequireRestartBeforeStat
 		{name: "store sources", cfg: func(t *testing.T, dir string) *config.Config {
 			cfg := requiredBoundaryConfig(t, dir, "")
 			cfg.Plugins.StoreSources = []string{"https://plugins.example.invalid/index.yaml"}
+			return cfg
+		}},
+		{name: "store auth", cfg: func(t *testing.T, dir string) *config.Config {
+			cfg := requiredBoundaryConfig(t, dir, "")
+			cfg.Plugins.StoreAuth = []sdkpluginstore.AuthConfig{{
+				Match:    "https://plugins.example.invalid/private/",
+				ApplyTo:  []string{sdkpluginstore.RequestKindArtifact},
+				Type:     sdkpluginstore.AuthTypeBearer,
+				TokenEnv: "PLUGIN_STORE_TOKEN",
+			}}
 			return cfg
 		}},
 		{name: "auth revision", cfg: func(t *testing.T, dir string) *config.Config {
@@ -261,6 +389,90 @@ func TestHostApplyConfigUnrelatedConfigChangeKeepsRequiredSchedulerActive(t *tes
 	h.mu.Unlock()
 	if got := reconfigureCalls.Load(); got != 0 {
 		t.Fatalf("plugin.reconfigure calls = %d, want 0", got)
+	}
+}
+
+func TestManagerSelectAuthRequiredSchedulerFailuresNeverUseNativeFallback(t *testing.T) {
+	tests := []struct {
+		name      string
+		scheduler pluginapi.Scheduler
+		setup     func(*Host)
+		noRecord  bool
+	}{
+		{name: "missing", noRecord: true},
+		{name: "unavailable", scheduler: nil},
+		{
+			name: "fused",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "native-fallback"}, nil
+			}),
+			setup: func(host *Host) { host.fusePlugin("quota-policy", "test", "fused") },
+		},
+		{
+			name: "panic",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				panic("scheduler panic")
+			}),
+		},
+		{
+			name: "scheduler error",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, errors.New("scheduler failed")
+			}),
+		},
+		{
+			name: "unhandled",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: false}, nil
+			}),
+		},
+		{
+			name: "empty invalid response",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true}, nil
+			}),
+		},
+		{
+			name: "unknown auth id",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "unknown-auth"}, nil
+			}),
+		},
+		{
+			name: "invalid delegate",
+			scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: "unknown-selector"}, nil
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var host *Host
+			if test.noRecord {
+				host = newHostWithRecords()
+			} else {
+				host = newHostWithRecords(capabilityRecord{
+					id: "quota-policy",
+					plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+						Scheduler: test.scheduler,
+					}},
+				})
+			}
+			host.Snapshot().requiredScheduler = "quota-policy"
+			if test.setup != nil {
+				test.setup(host)
+			}
+			manager := restartBoundaryTestManager(t, host)
+
+			selected, errSelect := manager.SelectAuth(context.Background(), "restart-boundary-provider", "", cliproxyexecutor.Options{})
+			if errSelect == nil {
+				t.Fatalf("SelectAuth() = %#v, nil; want required-scheduler error", selected)
+			}
+			if selected != nil {
+				t.Fatalf("SelectAuth() selected %#v after required-scheduler failure; native fallback must remain blocked", selected)
+			}
+		})
 	}
 }
 

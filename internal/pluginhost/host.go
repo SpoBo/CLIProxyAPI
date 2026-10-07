@@ -218,14 +218,17 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	if errPreflight != nil {
 		return errPreflight
 	}
-	if preserveRequired {
-		return nil
-	}
 	if cfg != nil {
 		cfg.NormalizePluginsConfig()
 		if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
 			return errValidate
 		}
+	}
+	if preserveRequired {
+		h.mu.Lock()
+		h.runtimeConfig = cfg
+		h.mu.Unlock()
+		return nil
 	}
 
 	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)

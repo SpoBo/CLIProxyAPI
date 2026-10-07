@@ -4,12 +4,14 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -17,6 +19,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
 
 func TestServiceApplyConfigRuntimeRejectsRequiredSchedulerFailures(t *testing.T) {
@@ -238,6 +241,68 @@ func TestServiceOptionalToRequiredTransitionIsRejectedBeforeConfigPublish(t *tes
 	}
 }
 
+func TestServiceStoreAuthMutationRequiresRestartBeforePluginCalls(t *testing.T) {
+	registration := `{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"quota-policy","Version":"1.0.0","Author":"test","GitHubRepository":"https://github.com/router-for-me/CLIProxyAPI"},"capabilities":{"scheduler":true}}}`
+	schedulerResponse := `{"ok":true,"result":{"handled":true,"reject":true,"reject_code":"policy_denied","reject_reason":"fixture policy rejection"}}`
+	callLog := filepath.Join(t.TempDir(), "plugin-calls.log")
+	pluginsDir := requiredSchedulerPluginDir(t, registration, schedulerResponse, false, callLog)
+	current := requiredSchedulerServiceConfig(pluginsDir)
+	host := pluginhost.New()
+	t.Cleanup(host.ShutdownAll)
+	if errApply := host.ApplyConfig(context.Background(), current); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	activeSnapshot := host.Snapshot()
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.SetConfig(current)
+	manager.SetPluginScheduler(host)
+	initialSelector := manager.Selector()
+	service := &Service{cfg: current, coreManager: manager, pluginHost: host}
+
+	mutated := cloneRequiredSchedulerServiceConfig(current)
+	mutated.Plugins.StoreAuth = []sdkpluginstore.AuthConfig{{
+		Match:    "https://plugins.example.invalid/private/",
+		ApplyTo:  []string{sdkpluginstore.RequestKindArtifact},
+		Type:     sdkpluginstore.AuthTypeBearer,
+		TokenEnv: "PLUGIN_STORE_TOKEN",
+	}}
+	errPreflight := host.PreflightConfig(mutated)
+	if !errors.Is(errPreflight, internalconfig.ErrRestartRequired) {
+		t.Fatalf("PreflightConfig() error = %v, want ErrRestartRequired", errPreflight)
+	}
+	var restartErr *internalconfig.RestartRequiredError
+	if !errors.As(errPreflight, &restartErr) {
+		t.Fatalf("PreflightConfig() error type = %T, want *RestartRequiredError", errPreflight)
+	}
+	if service.applyConfigUpdateWithAuthSynthesis(context.Background(), mutated, false) {
+		t.Fatal("store-auth mutation hot reload succeeded, want restart-required rejection")
+	}
+
+	service.cfgMu.RLock()
+	gotCfg := service.cfg
+	service.cfgMu.RUnlock()
+	if gotCfg != current || service.configSequence != 0 {
+		t.Fatalf("rejected store-auth reload changed service config state: cfg=%p sequence=%d", gotCfg, service.configSequence)
+	}
+	if manager.Selector() != initialSelector || pluginSchedulerFromManager(t, manager) != host {
+		t.Fatal("rejected store-auth reload changed manager state")
+	}
+	if host.Snapshot() != activeSnapshot {
+		t.Fatal("rejected store-auth reload changed plugin snapshot")
+	}
+	rawCalls, errRead := os.ReadFile(callLog)
+	if errRead != nil {
+		t.Fatalf("ReadFile(plugin call log) error = %v", errRead)
+	}
+	calls := string(rawCalls)
+	if got := strings.Count(calls, "plugin.register\n"); got != 1 {
+		t.Fatalf("plugin.register calls = %d, want initial call only; log=%q", got, calls)
+	}
+	if got := strings.Count(calls, "plugin.reconfigure\n"); got != 0 {
+		t.Fatalf("plugin.reconfigure calls = %d, want 0; log=%q", got, calls)
+	}
+}
+
 func TestServiceUnrelatedHotReloadPreservesActiveRequiredScheduler(t *testing.T) {
 	registration := `{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"quota-policy","Version":"1.0.0","Author":"test","GitHubRepository":"https://github.com/router-for-me/CLIProxyAPI"},"capabilities":{"scheduler":true}}}`
 	schedulerResponse := `{"ok":true,"result":{"handled":true,"reject":true,"reject_code":"policy_denied","reject_reason":"fixture policy rejection"}}`
@@ -313,7 +378,7 @@ func cloneRequiredSchedulerServiceConfig(cfg *config.Config) *config.Config {
 	return &cloned
 }
 
-func requiredSchedulerPluginDir(t *testing.T, registration string, schedulerResponse string, invalidFile bool) string {
+func requiredSchedulerPluginDir(t *testing.T, registration string, schedulerResponse string, invalidFile bool, callLogPath ...string) string {
 	t.Helper()
 	root := t.TempDir()
 	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
@@ -330,8 +395,13 @@ func requiredSchedulerPluginDir(t *testing.T, registration string, schedulerResp
 	if _, errLookPath := exec.LookPath("cc"); errLookPath != nil {
 		t.Skip("C compiler required for native plugin integration test")
 	}
+	callLog := ""
+	if len(callLogPath) > 0 {
+		callLog = callLogPath[0]
+	}
 	source := fmt.Sprintf(`#include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct { void *ptr; size_t len; } cliproxy_buffer;
@@ -347,10 +417,21 @@ typedef struct {
 
 static const char *registration = %s;
 static const char *scheduler_response = %s;
+static const char *call_log = %s;
 static const char *reconfigure_response = "{\"ok\":false,\"error\":{\"code\":\"restart_required\",\"message\":\"required scheduler reconfigure must not be called\"}}";
+
+static void record_call(const char *method) {
+    if (call_log[0] == '\0') return;
+    if (strcmp(method, "plugin.register") != 0 && strcmp(method, "plugin.reconfigure") != 0) return;
+    FILE *file = fopen(call_log, "a");
+    if (file == NULL) return;
+    fprintf(file, "%%s\n", method);
+    fclose(file);
+}
 
 static int fixture_call(const char *method, const uint8_t *request, size_t request_len, cliproxy_buffer *response) {
     (void)request; (void)request_len;
+    record_call(method);
     const char *payload = strcmp(method, "scheduler.pick") == 0 ? scheduler_response :
         (strcmp(method, "plugin.reconfigure") == 0 ? reconfigure_response : registration);
     size_t len = strlen(payload);
@@ -370,7 +451,7 @@ int cliproxy_plugin_init(const void *host, cliproxy_plugin_api *plugin) {
     plugin->shutdown = NULL;
     return 0;
 }
-`, strconv.Quote(registration), strconv.Quote(schedulerResponse))
+`, strconv.Quote(registration), strconv.Quote(schedulerResponse), strconv.Quote(callLog))
 	sourcePath := filepath.Join(t.TempDir(), "plugin.c")
 	if errWrite := os.WriteFile(sourcePath, []byte(source), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile(source) error = %v", errWrite)
