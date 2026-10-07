@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -129,6 +130,189 @@ func TestServiceApplyConfigRuntimeKeepsDefaultWithoutPluginHost(t *testing.T) {
 	}
 }
 
+func TestServiceRequiredSchedulerMutationIsRejectedBeforeAnyRuntimeStateChanges(t *testing.T) {
+	registration := `{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"quota-policy","Version":"1.0.0","Author":"test","GitHubRepository":"https://github.com/router-for-me/CLIProxyAPI"},"capabilities":{"scheduler":true}}}`
+	schedulerResponse := `{"ok":true,"result":{"handled":true,"reject":true,"reject_code":"policy_denied","reject_reason":"fixture policy rejection"}}`
+	pluginsDir := requiredSchedulerPluginDir(t, registration, schedulerResponse, false)
+	current := requiredSchedulerServiceConfig(pluginsDir)
+	host := pluginhost.New()
+	t.Cleanup(host.ShutdownAll)
+	if errApply := host.ApplyConfig(context.Background(), current); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	activeSnapshot := host.Snapshot()
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.SetConfig(current)
+	manager.SetPluginScheduler(host)
+	initialSelector := manager.Selector()
+	discoveryManager := newDiscoveryAdvertiserManager()
+	discoveryManager.lastCfg = current
+	discoveryManager.generation = 41
+	pprofMarker := &pprofServer{}
+	service := &Service{
+		cfg:              current,
+		coreManager:      manager,
+		pluginHost:       host,
+		discoveryManager: discoveryManager,
+		pprofServer:      pprofMarker,
+	}
+	pprofCalls := 0
+	clientCalls := 0
+	service.applyPprofConfigContextFn = func(context.Context, *config.Config) bool {
+		pprofCalls++
+		return true
+	}
+	service.updateServerClientsContextFn = func(context.Context, *config.Config) bool {
+		clientCalls++
+		return true
+	}
+
+	mutated := cloneRequiredSchedulerServiceConfig(current)
+	mutated.Plugins.RequiredScheduler = ""
+	mutated.Routing.Strategy = "fill-first"
+	mutated.Debug = true
+	if service.applyConfigUpdateWithAuthSynthesis(context.Background(), mutated, false) {
+		t.Fatal("required scheduler mutation hot reload succeeded, want restart-required rejection")
+	}
+	service.cfgMu.RLock()
+	gotCfg := service.cfg
+	service.cfgMu.RUnlock()
+	if gotCfg != current {
+		t.Fatal("rejected reload published s.cfg")
+	}
+	if manager.Selector() != initialSelector {
+		t.Fatal("rejected reload changed auth manager selector")
+	}
+	if pprofCalls != 0 || service.pprofServer != pprofMarker {
+		t.Fatalf("rejected reload changed pprof state: calls=%d server=%p", pprofCalls, service.pprofServer)
+	}
+	discoveryManager.mu.Lock()
+	if discoveryManager.lastCfg != current || discoveryManager.generation != 41 {
+		t.Fatalf("rejected reload changed discovery state: cfg=%p generation=%d", discoveryManager.lastCfg, discoveryManager.generation)
+	}
+	discoveryManager.mu.Unlock()
+	if clientCalls != 0 {
+		t.Fatalf("rejected reload updated server clients %d times", clientCalls)
+	}
+	if host.Snapshot() != activeSnapshot {
+		t.Fatal("rejected reload changed plugin snapshot")
+	}
+	if pluginSchedulerFromManager(t, manager) != host {
+		t.Fatal("rejected reload changed manager plugin scheduler")
+	}
+}
+
+func TestServiceOptionalToRequiredTransitionIsRejectedBeforeConfigPublish(t *testing.T) {
+	optional := &config.Config{}
+	host := pluginhost.New()
+	t.Cleanup(host.ShutdownAll)
+	if errApply := host.ApplyConfig(context.Background(), optional); errApply != nil {
+		t.Fatalf("initial optional ApplyConfig() error = %v", errApply)
+	}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	initialSelector := manager.Selector()
+	service := &Service{cfg: optional, coreManager: manager, pluginHost: host}
+	enabled := true
+	required := &config.Config{
+		Routing: internalconfig.RoutingConfig{Strategy: "fill-first"},
+		Plugins: config.PluginsConfig{
+			Enabled:           true,
+			Dir:               t.TempDir(),
+			RequiredScheduler: "quota-policy",
+			Configs: map[string]config.PluginInstanceConfig{
+				"quota-policy": {Enabled: &enabled},
+			},
+		},
+	}
+	if service.applyConfigUpdateWithAuthSynthesis(context.Background(), required, false) {
+		t.Fatal("optional-to-required hot transition succeeded")
+	}
+	service.cfgMu.RLock()
+	gotCfg := service.cfg
+	service.cfgMu.RUnlock()
+	if gotCfg != optional {
+		t.Fatal("optional-to-required rejection published s.cfg")
+	}
+	if manager.Selector() != initialSelector {
+		t.Fatal("optional-to-required rejection changed manager selector")
+	}
+}
+
+func TestServiceUnrelatedHotReloadPreservesActiveRequiredScheduler(t *testing.T) {
+	registration := `{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"quota-policy","Version":"1.0.0","Author":"test","GitHubRepository":"https://github.com/router-for-me/CLIProxyAPI"},"capabilities":{"scheduler":true}}}`
+	schedulerResponse := `{"ok":true,"result":{"handled":true,"reject":true,"reject_code":"policy_denied","reject_reason":"fixture policy rejection"}}`
+	pluginsDir := requiredSchedulerPluginDir(t, registration, schedulerResponse, false)
+	current := requiredSchedulerServiceConfig(pluginsDir)
+	host := pluginhost.New()
+	t.Cleanup(host.ShutdownAll)
+	if errApply := host.ApplyConfig(context.Background(), current); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	activeSnapshot := host.Snapshot()
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.SetConfig(current)
+	manager.SetPluginScheduler(host)
+	service := &Service{cfg: current, coreManager: manager, pluginHost: host}
+	pprofCalls := 0
+	clientCalls := 0
+	service.applyPprofConfigContextFn = func(context.Context, *config.Config) bool {
+		pprofCalls++
+		return true
+	}
+	service.updateServerClientsContextFn = func(context.Context, *config.Config) bool {
+		clientCalls++
+		return true
+	}
+
+	unrelated := cloneRequiredSchedulerServiceConfig(current)
+	unrelated.Routing.Strategy = "fill-first"
+	unrelated.Debug = true
+	if !service.applyConfigUpdateWithAuthSynthesis(context.Background(), unrelated, false) {
+		t.Fatal("unrelated hot reload failed")
+	}
+	service.cfgMu.RLock()
+	gotCfg := service.cfg
+	service.cfgMu.RUnlock()
+	if gotCfg != unrelated {
+		t.Fatal("unrelated hot reload did not publish s.cfg")
+	}
+	if _, ok := manager.Selector().(*coreauth.FillFirstSelector); !ok {
+		t.Fatalf("unrelated hot reload selector = %T, want *FillFirstSelector", manager.Selector())
+	}
+	if pprofCalls != 1 || clientCalls != 1 {
+		t.Fatalf("unrelated hot reload calls: pprof=%d clients=%d, want 1 each", pprofCalls, clientCalls)
+	}
+	if host.Snapshot() != activeSnapshot {
+		t.Fatal("unrelated hot reload replaced required scheduler snapshot")
+	}
+	if pluginSchedulerFromManager(t, manager) != host {
+		t.Fatal("unrelated hot reload replaced required scheduler client")
+	}
+}
+
+func requiredSchedulerServiceConfig(pluginsDir string) *config.Config {
+	enabled := true
+	return &config.Config{Plugins: config.PluginsConfig{
+		Enabled:           true,
+		Dir:               pluginsDir,
+		RequiredScheduler: "quota-policy",
+		Configs: map[string]config.PluginInstanceConfig{
+			"quota-policy": {Enabled: &enabled},
+		},
+	}}
+}
+
+func cloneRequiredSchedulerServiceConfig(cfg *config.Config) *config.Config {
+	cloned := *cfg
+	cloned.Plugins = cfg.Plugins
+	cloned.Plugins.StoreSources = append([]string(nil), cfg.Plugins.StoreSources...)
+	cloned.Plugins.Configs = make(map[string]config.PluginInstanceConfig, len(cfg.Plugins.Configs))
+	for id, item := range cfg.Plugins.Configs {
+		cloned.Plugins.Configs[id] = item
+	}
+	return &cloned
+}
+
 func requiredSchedulerPluginDir(t *testing.T, registration string, schedulerResponse string, invalidFile bool) string {
 	t.Helper()
 	root := t.TempDir()
@@ -163,10 +347,12 @@ typedef struct {
 
 static const char *registration = %s;
 static const char *scheduler_response = %s;
+static const char *reconfigure_response = "{\"ok\":false,\"error\":{\"code\":\"restart_required\",\"message\":\"required scheduler reconfigure must not be called\"}}";
 
 static int fixture_call(const char *method, const uint8_t *request, size_t request_len, cliproxy_buffer *response) {
     (void)request; (void)request_len;
-    const char *payload = strcmp(method, "scheduler.pick") == 0 ? scheduler_response : registration;
+    const char *payload = strcmp(method, "scheduler.pick") == 0 ? scheduler_response :
+        (strcmp(method, "plugin.reconfigure") == 0 ? reconfigure_response : registration);
     size_t len = strlen(payload);
     response->ptr = malloc(len);
     response->len = len;

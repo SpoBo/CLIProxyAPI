@@ -73,6 +73,7 @@ type Host struct {
 	activePluginPaths      map[string]string
 	cleanupFilesPending    bool
 	runtimeConfig          *config.Config
+	requiredBoundary       *requiredSchedulerBoundary
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
 	modelClientIDs         map[string]struct{}
@@ -213,6 +214,13 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	if errContext := ctx.Err(); errContext != nil {
 		return errContext
 	}
+	preserveRequired, errPreflight := h.preflightConfig(cfg)
+	if errPreflight != nil {
+		return errPreflight
+	}
+	if preserveRequired {
+		return nil
+	}
 	if cfg != nil {
 		cfg.NormalizePluginsConfig()
 		if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
@@ -262,9 +270,6 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 		h.mu.Unlock()
 		h.refreshThinkingProviders(nil)
 		return nil
-	}
-	if strings.TrimSpace(cfg.Plugins.RequiredScheduler) != "" {
-		return h.applyRequiredConfig(ctx, cfg, rc, files, desiredVersions)
 	}
 	h.mu.Lock()
 	h.runtimeConfig = cfg
@@ -446,260 +451,19 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	if required != "" {
 		for _, record := range records {
 			if record.id == required && record.plugin.Capabilities.Scheduler != nil {
+				boundary, errBoundary := requiredSchedulerBoundaryFromConfig(cfg)
+				if errBoundary != nil {
+					return errBoundary
+				}
+				h.mu.Lock()
+				h.requiredBoundary = boundary
+				h.mu.Unlock()
 				return nil
 			}
 		}
 		return fmt.Errorf("required scheduler %q did not load and register a scheduler capability", required)
 	}
 	return nil
-}
-
-type requiredApplyCandidate struct {
-	file      pluginFile
-	item      runtimeItemConfig
-	loaded    *loadedPlugin
-	replaced  *loadedPlugin
-	request   *pluginLoadRequest
-	hotReload log.Fields
-}
-
-type requiredApplyReconfiguration struct {
-	loaded     *loadedPlugin
-	item       runtimeItemConfig
-	name       string
-	version    string
-	configYAML []byte
-	plugin     pluginapi.Plugin
-	registered bool
-	fused      string
-	wasFused   bool
-}
-
-// applyRequiredConfig prepares and validates a complete candidate runtime before
-// publishing any active state. Failed candidates are discarded while the prior
-// required scheduler and all of its active runtime state remain published.
-func (h *Host) applyRequiredConfig(ctx context.Context, cfg *config.Config, rc runtimeConfig, files []pluginFile, desiredVersions map[string]string) error {
-	required := strings.TrimSpace(cfg.Plugins.RequiredScheduler)
-	priorSnapshot := h.Snapshot()
-	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
-
-	records := make([]capabilityRecord, 0, len(files))
-	loadedFiles := make([]pluginFile, 0, len(files))
-	candidates := make([]requiredApplyCandidate, 0)
-	reconfigurations := make([]requiredApplyReconfiguration, 0)
-
-	fail := func(errApply error) error {
-		h.rollbackRequiredReconfigurations(reconfigurations)
-		for index := len(candidates) - 1; index >= 0; index-- {
-			candidate := candidates[index]
-			h.cleanupPluginLoadAndWait(candidate.file.ID, candidate.request, candidate.loaded)
-		}
-		if strings.TrimSpace(priorSnapshot.requiredScheduler) == "" {
-			h.snapshot.Store(&Snapshot{
-				enabled:                 priorSnapshot.enabled,
-				records:                 append([]capabilityRecord(nil), priorSnapshot.records...),
-				requiredScheduler:       required,
-				quotaSupportedProviders: make(map[string][]string),
-			})
-		}
-		return errApply
-	}
-
-	for _, file := range files {
-		item, ok := rc.Items[file.ID]
-		if !ok {
-			item = defaultRuntimeItemConfig(file.ID)
-		}
-		if !item.Enabled {
-			continue
-		}
-
-		h.mu.Lock()
-		lp := h.loaded[file.ID]
-		var replaced *loadedPlugin
-		if lp != nil && cleanPluginPath(lp.path) != cleanPluginPath(file.Path) {
-			replaced = lp
-			lp = nil
-		}
-		_, disabled := h.fused[file.ID]
-		h.mu.Unlock()
-		if disabled && replaced == nil {
-			return fail(fmt.Errorf("required scheduler apply failed because plugin %q is fused", file.ID))
-		}
-
-		plugin := pluginapi.Plugin{}
-		if lp == nil {
-			request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
-			candidateIndex := len(candidates)
-			candidates = append(candidates, requiredApplyCandidate{file: file, item: item, replaced: replaced, request: request})
-			h.mu.Lock()
-			if _, loading := h.loading[file.ID]; loading {
-				h.mu.Unlock()
-				candidates = candidates[:candidateIndex]
-				return fail(fmt.Errorf("required scheduler apply could not load plugin %q because it is already loading", file.ID))
-			}
-			h.loading[file.ID] = request
-			h.mu.Unlock()
-
-			h.startPluginLoad(ctx, file, item, request)
-			loadResult, completed := h.waitForPluginLoad(ctx, request)
-			if !completed {
-				candidates = candidates[:candidateIndex]
-				h.cleanupCanceledPluginLoad(file.ID, request)
-				h.rollbackRequiredReconfigurations(reconfigurations)
-				if errContext := ctx.Err(); errContext != nil {
-					return errContext
-				}
-				return context.Canceled
-			}
-			candidates[candidateIndex].loaded = loadResult.loaded
-			if loadResult.err != nil {
-				log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, loadResult.err)
-				return fail(fmt.Errorf("required scheduler apply failed to load plugin %q: %w", file.ID, loadResult.err))
-			}
-			if !loadResult.initialized {
-				return fail(fmt.Errorf("required scheduler apply failed to register or configure plugin %q", file.ID))
-			}
-			h.mu.Lock()
-			requestCurrent := h.loading[file.ID] == request
-			h.mu.Unlock()
-			if !requestCurrent {
-				return fail(context.Canceled)
-			}
-			lp = loadResult.loaded
-			plugin = loadResult.plugin
-			if replaced != nil {
-				candidates[candidateIndex].hotReload = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
-			}
-			log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
-			log.WithFields(pluginLogFieldsFromMetadata(file.ID, plugin.Metadata, file.Path)).Info("pluginhost: plugin registered")
-		} else {
-			h.mu.Lock()
-			previous := requiredApplyReconfiguration{
-				loaded:     lp,
-				item:       item,
-				name:       lp.name,
-				version:    lp.version,
-				configYAML: bytes.Clone(lp.configYAML),
-				plugin:     lp.plugin,
-				registered: lp.registered,
-			}
-			previous.fused, previous.wasFused = h.fused[file.ID]
-			h.mu.Unlock()
-			reconfigurations = append(reconfigurations, previous)
-			var okCall bool
-			plugin, okCall = h.callRegisterIsolated(ctx, lp, item)
-			if !okCall {
-				return fail(fmt.Errorf("required scheduler apply failed to register or configure plugin %q", file.ID))
-			}
-		}
-
-		plugin.Metadata = clonePluginMetadata(plugin.Metadata)
-		records = append(records, capabilityRecord{
-			id:       file.ID,
-			path:     file.Path,
-			version:  file.Version,
-			priority: item.Priority,
-			meta:     plugin.Metadata,
-			plugin:   plugin,
-		})
-		loadedFiles = append(loadedFiles, file)
-	}
-
-	sortRecords(records)
-	if !recordsContainRequiredScheduler(records, required) {
-		return fail(fmt.Errorf("required scheduler %q did not load and register a scheduler capability", required))
-	}
-	if errContext := ctx.Err(); errContext != nil {
-		return fail(errContext)
-	}
-
-	h.mu.Lock()
-	for _, candidate := range candidates {
-		if h.loading[candidate.file.ID] != candidate.request {
-			h.mu.Unlock()
-			return fail(context.Canceled)
-		}
-	}
-	cleanupFiles := h.cleanupFilesPending
-	if len(loadedFiles) > 0 {
-		h.cleanupFilesPending = false
-	}
-	candidateIdentities := make(map[string]capabilityRecord, len(records))
-	for _, record := range records {
-		candidateIdentities[record.id] = record
-	}
-	for _, prior := range priorSnapshot.records {
-		candidate, exists := candidateIdentities[prior.id]
-		if !exists || cleanPluginPath(candidate.path) != cleanPluginPath(prior.path) || candidate.version != prior.version {
-			h.removePluginRuntimeStateLocked(prior.id)
-		}
-	}
-	for _, candidate := range candidates {
-		delete(h.loading, candidate.file.ID)
-		if candidate.replaced != nil {
-			h.retireLoadedPluginLocked(candidate.replaced)
-			delete(h.fused, candidate.file.ID)
-		}
-		h.loaded[candidate.file.ID] = candidate.loaded
-	}
-	h.runtimeConfig = cfg
-	h.rebuildActivePluginMapsLocked(records)
-	h.snapshot.Store(&Snapshot{
-		enabled:                 true,
-		records:                 records,
-		requiredScheduler:       required,
-		quotaSupportedProviders: make(map[string][]string),
-	})
-	h.mu.Unlock()
-
-	for _, candidate := range candidates {
-		if candidate.replaced != nil {
-			h.callQuiesce(context.Background(), candidate.replaced)
-		}
-	}
-	h.refreshThinkingProviders(records)
-	for _, candidate := range candidates {
-		if candidate.hotReload != nil {
-			log.WithFields(candidate.hotReload).Info("pluginhost: plugin hot reloaded")
-		}
-	}
-	if cleanupFiles && len(loadedFiles) > 0 {
-		if errCleanup := cleanupUnselectedPluginFiles(rc.Dir, loadedFiles); errCleanup != nil {
-			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
-		}
-	}
-	return nil
-}
-
-func recordsContainRequiredScheduler(records []capabilityRecord, required string) bool {
-	for _, record := range records {
-		if record.id == required && record.plugin.Capabilities.Scheduler != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func (h *Host) rollbackRequiredReconfigurations(items []requiredApplyReconfiguration) {
-	for index := len(items) - 1; index >= 0; index-- {
-		previous := items[index]
-		rollbackItem := previous.item
-		rollbackItem.ConfigYAML = bytes.Clone(previous.configYAML)
-		_, _ = h.callRegisterIsolated(context.Background(), previous.loaded, rollbackItem)
-		h.mu.Lock()
-		previous.loaded.name = previous.name
-		previous.loaded.version = previous.version
-		previous.loaded.configYAML = bytes.Clone(previous.configYAML)
-		previous.loaded.plugin = previous.plugin
-		previous.loaded.registered = previous.registered
-		if previous.wasFused {
-			h.fused[previous.loaded.id] = previous.fused
-		} else {
-			delete(h.fused, previous.loaded.id)
-		}
-		h.mu.Unlock()
-	}
 }
 
 func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
@@ -764,7 +528,7 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 			client:           guardedClient,
 			callbackInstance: pluginCallbackInstance(guardedClient),
 		}
-		plugin, okCall := h.callRegisterIsolated(ctx, loaded, item)
+		plugin, okCall := h.callRegister(ctx, loaded, item)
 		request.result <- pluginLoadResult{loaded: loaded, plugin: plugin, initialized: okCall}
 	}()
 }
@@ -1069,6 +833,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.pluginFileVersions = make(map[string]string)
 	h.activePluginVersions = make(map[string]string)
 	h.activePluginPaths = make(map[string]string)
+	h.requiredBoundary = nil
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 
@@ -1327,14 +1092,6 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 }
 
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
-	return h.callRegisterWithIsolation(ctx, lp, item, false)
-}
-
-func (h *Host) callRegisterIsolated(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
-	return h.callRegisterWithIsolation(ctx, lp, item, true)
-}
-
-func (h *Host) callRegisterWithIsolation(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig, isolatePanic bool) (pluginapi.Plugin, bool) {
 	if lp == nil {
 		return pluginapi.Plugin{}, false
 	}
@@ -1347,7 +1104,7 @@ func (h *Host) callRegisterWithIsolation(ctx context.Context, lp *loadedPlugin, 
 		method = pluginabi.MethodPluginReconfigure
 	}
 
-	plugin, okCall := h.safePluginRegistrationCall(ctx, lp, method, isolatePanic, func() pluginapi.Plugin {
+	plugin, okCall := h.safePluginCall(ctx, lp.id, method, func() pluginapi.Plugin {
 		plugin, errRegister := registerRPCPlugin(ctx, h, lp.id, lp.client, method, item.ConfigYAML)
 		if errRegister != nil {
 			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
@@ -1390,32 +1147,6 @@ func (h *Host) safePluginAction(ctx context.Context, id, method string, fn func(
 		select {
 		case <-ctx.Done():
 			return ctx.Err(), false
-		default:
-		}
-	}
-	return fn(), true
-}
-
-func (h *Host) safePluginRegistrationCall(ctx context.Context, lp *loadedPlugin, method string, isolatePanic bool, fn func() pluginapi.Plugin) (out pluginapi.Plugin, ok bool) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			h.mu.Lock()
-			active := !isolatePanic && lp != nil && h.loaded[lp.id] == lp
-			h.mu.Unlock()
-			if active {
-				h.fusePlugin(lp.id, method, recovered)
-			} else {
-				log.WithField("plugin_id", lp.id).WithField("method", method).Errorf("pluginhost: candidate plugin panic recovered: %v", recovered)
-			}
-			out = pluginapi.Plugin{}
-			ok = false
-		}
-	}()
-
-	if ctx != nil {
-		select {
-		case <-ctx.Done():
-			return pluginapi.Plugin{}, false
 		default:
 		}
 	}

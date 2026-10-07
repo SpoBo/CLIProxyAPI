@@ -1129,6 +1129,14 @@ plugins:
   # Startup/config application fails if it cannot register. Runtime scheduler
   # absence, panic, error, or invalid selection rejects the request instead of
   # falling back to native credential scheduling.
+  # Required scheduler activation is a restart boundary. Enabling, disabling,
+  # or renaming it, changing the plugin directory/binary selection, enabled
+  # plugin set, store settings, or plugin config (including tier topology)
+  # is rejected by hot reload and requires a service restart. Unrelated config
+  # may still reload without replacing or reconfiguring the active scheduler.
+  # Live operational state belongs to the plugin: expose an authenticated
+  # ManagementRoute and atomically persist a state file that the plugin watches
+  # or reloads itself. The host does not watch plugin-owned state files.
   # required-scheduler: "scheduler"
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:

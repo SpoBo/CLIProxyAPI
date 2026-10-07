@@ -70,6 +70,8 @@ func New() *Host {
 }
 
 // ApplyConfig applies plugin runtime configuration and validates any required scheduler.
+// Once a required scheduler is active, equivalent plugin configuration is a no-op;
+// changing that protected runtime returns sdk/config.ErrRestartRequired and requires a restart.
 func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) error {
 	if h == nil || h.inner == nil {
 		return context.Canceled

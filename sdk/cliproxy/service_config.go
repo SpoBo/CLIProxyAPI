@@ -111,6 +111,26 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
+	if s.pluginHost != nil {
+		if errPreflight := s.pluginHost.PreflightConfig(newCfg); errPreflight != nil {
+			log.WithError(errPreflight).Warn("rejected config update that requires service restart")
+			return configCommit{}
+		}
+	} else {
+		s.cfgMu.RLock()
+		currentCfg := s.cfg
+		s.cfgMu.RUnlock()
+		currentRequired := currentCfg != nil && strings.TrimSpace(currentCfg.Plugins.RequiredScheduler) != ""
+		incomingRequired := strings.TrimSpace(newCfg.Plugins.RequiredScheduler) != ""
+		if currentRequired || incomingRequired {
+			errPreflight := &config.RestartRequiredError{
+				Component: "required scheduler runtime configuration",
+				Reason:    "a plugin host is not available for runtime validation",
+			}
+			log.WithError(errPreflight).Warn("rejected config update that requires service restart")
+			return configCommit{}
+		}
+	}
 	if errValidate := newCfg.ValidateCredentialWeights(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
