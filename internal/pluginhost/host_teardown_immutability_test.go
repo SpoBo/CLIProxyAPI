@@ -39,7 +39,7 @@ func TestHostTeardownRequiredSchedulerRemovesRuntimeAndAllowsReuse(t *testing.T)
 	executorManager := newFakeExecutorManager()
 	executorManager.RegisterExecutor(&executorAdapter{host: host, pluginID: "quota-policy", provider: "teardown-provider"})
 	accessKey := "plugin:quota-policy:teardown-auth"
-	sdkaccess.RegisterProvider(accessKey, teardownAccessProvider{id: accessKey})
+	accessRegistration := sdkaccess.RegisterProviderOwned(accessKey, teardownAccessProvider{id: accessKey})
 	t.Cleanup(func() { sdkaccess.UnregisterProvider(accessKey) })
 
 	host.mu.Lock()
@@ -49,6 +49,7 @@ func TestHostTeardownRequiredSchedulerRemovesRuntimeAndAllowsReuse(t *testing.T)
 	host.executorManager = executorManager
 	host.executorProviders = map[string]struct{}{"teardown-provider": {}}
 	host.accessProviderKeys = map[string]struct{}{accessKey: {}}
+	host.accessProviderRegistrations = map[string]sdkaccess.ProviderRegistration{accessKey: accessRegistration}
 	host.managementRoutes["GET /teardown"] = managementRouteRecord{pluginID: "quota-policy"}
 	host.resourceRoutes["GET /v0/resource/plugins/quota-policy/teardown"] = resourceRouteRecord{pluginID: "quota-policy"}
 	host.mu.Unlock()

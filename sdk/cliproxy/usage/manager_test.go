@@ -86,6 +86,27 @@ func TestRecordOmittedGenerateIsEnabled(t *testing.T) {
 	}
 }
 
+func TestManagerOwnedNamedRegistrationDoesNotRemoveReplacement(t *testing.T) {
+	manager := NewManager(1)
+	first := &usagePluginStub{}
+	second := &usagePluginStub{}
+	firstRegistration := manager.RegisterNamedOwned("shared", first)
+	secondRegistration := manager.RegisterNamedOwned("shared", second)
+
+	if manager.UnregisterNamedOwned(firstRegistration) {
+		t.Fatal("stale named registration removed its replacement")
+	}
+	if got := manager.NamedPlugin("shared"); got != second {
+		t.Fatalf("NamedPlugin(shared) = %#v, want replacement", got)
+	}
+	if !manager.UnregisterNamedOwned(secondRegistration) {
+		t.Fatal("current named registration was not removed")
+	}
+	if got := manager.NamedPlugin("shared"); got != nil {
+		t.Fatalf("NamedPlugin(shared) = %#v, want nil", got)
+	}
+}
+
 func TestManagerUnregisterNamedRemovesOnlyTargetAndRepairsIndexes(t *testing.T) {
 	manager := NewManager(1)
 	unnamed := &usagePluginStub{}

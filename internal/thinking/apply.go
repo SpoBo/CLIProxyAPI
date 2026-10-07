@@ -12,11 +12,19 @@ import (
 
 type pluginProviderApplier struct {
 	owner    string
+	ownerID  uint64
 	priority int
 	applier  ProviderApplier
 }
 
+// PluginProviderRegistration identifies one exact plugin provider installation.
+type PluginProviderRegistration struct {
+	provider string
+	ownerID  uint64
+}
+
 var providerAppliersMu sync.RWMutex
+var nextPluginProviderOwner uint64
 
 // nativeProviderAppliers maps built-in provider names to their implementations.
 var nativeProviderAppliers = map[string]ProviderApplier{
@@ -63,26 +71,41 @@ func RegisterProvider(name string, applier ProviderApplier) {
 
 // RegisterPluginProvider registers a plugin-owned provider applier.
 func RegisterPluginProvider(owner string, name string, priority int, applier ProviderApplier) bool {
+	_, ok := registerPluginProvider(owner, name, priority, applier, false)
+	return ok
+}
+
+// RegisterPluginProviderOwned registers a plugin provider and returns its installation identity.
+// A later installation by the same logical owner replaces its prior generation.
+func RegisterPluginProviderOwned(owner string, name string, priority int, applier ProviderApplier) (PluginProviderRegistration, bool) {
+	return registerPluginProvider(owner, name, priority, applier, true)
+}
+
+func registerPluginProvider(owner string, name string, priority int, applier ProviderApplier, replaceSameOwner bool) (PluginProviderRegistration, bool) {
 	owner = strings.TrimSpace(owner)
 	name = normalizedProviderName(name)
 	if owner == "" || name == "" || applier == nil {
-		return false
+		return PluginProviderRegistration{}, false
 	}
 	providerAppliersMu.Lock()
 	defer providerAppliersMu.Unlock()
 	if _, native := nativeProviderAppliers[name]; native {
-		return false
+		return PluginProviderRegistration{}, false
 	}
 	current, exists := pluginProviderAppliers[name]
-	if exists && (current.priority > priority || (current.priority == priority && current.owner <= owner)) {
-		return false
+	if exists && !(replaceSameOwner && current.owner == owner) &&
+		(current.priority > priority || (current.priority == priority && current.owner <= owner)) {
+		return PluginProviderRegistration{}, false
 	}
+	nextPluginProviderOwner++
+	registration := PluginProviderRegistration{provider: name, ownerID: nextPluginProviderOwner}
 	pluginProviderAppliers[name] = pluginProviderApplier{
 		owner:    owner,
+		ownerID:  registration.ownerID,
 		priority: priority,
 		applier:  applier,
 	}
-	return true
+	return registration, true
 }
 
 // UnregisterPluginProviders removes all provider appliers owned by one plugin.
@@ -98,6 +121,22 @@ func UnregisterPluginProviders(owner string) {
 			delete(pluginProviderAppliers, provider)
 		}
 	}
+}
+
+// UnregisterPluginProviderOwned removes a provider only when registration is still current.
+func UnregisterPluginProviderOwned(registration PluginProviderRegistration) bool {
+	if registration.provider == "" || registration.ownerID == 0 {
+		return false
+	}
+	providerAppliersMu.Lock()
+	current, exists := pluginProviderAppliers[registration.provider]
+	if !exists || current.ownerID != registration.ownerID {
+		providerAppliersMu.Unlock()
+		return false
+	}
+	delete(pluginProviderAppliers, registration.provider)
+	providerAppliersMu.Unlock()
+	return true
 }
 
 // ClearPluginProviders removes all plugin-owned provider appliers.

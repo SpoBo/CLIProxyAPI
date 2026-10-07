@@ -2348,7 +2348,7 @@ func finishPendingPluginLoadForTest(t *testing.T, request *pluginLoadRequest, in
 
 func TestHostCanceledLoadRejectsLateCallbackInstance(t *testing.T) {
 	h := New()
-	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1), done: make(chan struct{})}
 	h.mu.Lock()
 	h.loading["alpha"] = request
 	h.mu.Unlock()
@@ -2357,7 +2357,7 @@ func TestHostCanceledLoadRejectsLateCallbackInstance(t *testing.T) {
 
 	h.cleanupCanceledPluginLoad("alpha", request)
 	instance = &hostCallbackInstance{}
-	h.registerHostCallbackInstance("alpha", instance)
+	h.registerHostCallbackInstanceForRequest(request, instance)
 	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
 	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
 		t.Fatal("canceled load allowed a late callback instance to open an HTTP operation")
@@ -2366,25 +2366,39 @@ func TestHostCanceledLoadRejectsLateCallbackInstance(t *testing.T) {
 
 func TestHostShutdownAllRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
 	h := New()
-	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1), done: make(chan struct{})}
 	h.mu.Lock()
 	h.loading["alpha"] = request
 	h.mu.Unlock()
-	var instance *hostCallbackInstance
-	defer func() { finishPendingPluginLoadForTest(t, request, instance) }()
 
-	h.ShutdownAll()
-	instance = &hostCallbackInstance{}
-	h.registerHostCallbackInstance("alpha", instance)
+	shutdownDone := make(chan struct{})
+	go func() {
+		h.ShutdownAll()
+		close(shutdownDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		h.mu.Lock()
+		closed := request.closed
+		h.mu.Unlock()
+		if closed || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	instance := &hostCallbackInstance{}
+	h.registerHostCallbackInstanceForRequest(request, instance)
 	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
 	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
 		t.Fatal("shutdown allowed a late callback instance to open an HTTP operation")
 	}
+	finishPendingPluginLoadForTest(t, request, instance)
+	waitForHostTestSignal(t, shutdownDone, "shutdown after pending load cleanup")
 }
 
 func TestHostUnloadRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
 	h := New()
-	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+	request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1), done: make(chan struct{})}
 	h.mu.Lock()
 	h.loading["alpha"] = request
 	h.mu.Unlock()
@@ -2395,14 +2409,14 @@ func TestHostUnloadRejectsLateCallbackInstanceFromPendingLoad(t *testing.T) {
 		t.Fatal("UnloadPlugin(alpha) = false, want true for a pending load")
 	}
 	instance = &hostCallbackInstance{}
-	h.registerHostCallbackInstance("alpha", instance)
+	h.registerHostCallbackInstanceForRequest(request, instance)
 	ctx := withHostCallbackIdentity(context.Background(), "alpha", instance)
 	if _, errOpen := h.openHostHTTPOperation(ctx, ""); errOpen == nil {
 		t.Fatal("unload allowed a late callback instance to open an HTTP operation")
 	}
 }
 
-func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {
+func TestHostShutdownAllWaitsForBlockedLoadCleanupAndThenAllowsReuse(t *testing.T) {
 	client := &blockingInitializationClient{
 		started:         make(chan struct{}),
 		release:         make(chan struct{}),
@@ -2430,31 +2444,29 @@ func TestHostShutdownAllRetainsBlockedLoadTokenUntilCleanup(t *testing.T) {
 	close(client.release)
 	waitForHostTestSignal(t, client.shutdownStarted, "plugin shutdown")
 
-	h.ShutdownAllContext(context.Background())
-	var applies sync.WaitGroup
-	for range 8 {
-		applies.Add(1)
-		go func() {
-			defer applies.Done()
-			h.ApplyConfig(context.Background(), cfg)
-		}()
-	}
-	applies.Wait()
-	if got := loader.calls.Load(); got != 1 {
-		t.Fatalf("Open calls while ShutdownAll cleanup is blocked = %d, want 1", got)
-	}
-	if !h.PluginBusy("alpha") {
-		t.Fatal("PluginBusy(alpha) = false before physical shutdown returns")
+	shutdownDone := make(chan struct{})
+	go func() {
+		h.ShutdownAllContext(context.Background())
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+		t.Fatal("ShutdownAllContext returned before physical load cleanup")
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	close(client.shutdownRelease)
-	deadline := time.Now().Add(time.Second)
-	for h.PluginBusy("alpha") && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	waitForHostTestSignal(t, shutdownDone, "shutdown after physical load cleanup")
 	if h.PluginBusy("alpha") {
 		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
 	}
+	if errApply := h.ApplyConfig(context.Background(), cfg); errApply != nil {
+		t.Fatalf("ApplyConfig() after shutdown error = %v", errApply)
+	}
+	if got := loader.calls.Load(); got != 2 {
+		t.Fatalf("Open calls after host reuse = %d, want 2", got)
+	}
+	h.ShutdownAll()
 }
 
 func TestHostCanceledRegisterRetainsLoadTokenUntilShutdownReturns(t *testing.T) {

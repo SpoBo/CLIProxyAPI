@@ -11,10 +11,14 @@ import (
 )
 
 func (h *Host) RegisterFrontendAuthProviders() {
-	if h == nil {
+	if h == nil || !h.lockApply(context.Background()) {
 		return
 	}
+	defer h.unlockApply()
+	h.registerFrontendAuthProvidersLocked()
+}
 
+func (h *Host) registerFrontendAuthProvidersLocked() {
 	type exclusiveFrontendAuthCandidate struct {
 		key      string
 		pluginID string
@@ -22,6 +26,7 @@ func (h *Host) RegisterFrontendAuthProviders() {
 	}
 
 	nextKeys := make(map[string]struct{})
+	nextRegistrations := make(map[string]sdkaccess.ProviderRegistration)
 	var bestExclusive exclusiveFrontendAuthCandidate
 	for _, record := range h.activeRecords() {
 		provider := record.plugin.Capabilities.FrontendAuthProvider
@@ -39,7 +44,7 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		if key == "" {
 			continue
 		}
-		sdkaccess.RegisterProvider(key, adapter)
+		nextRegistrations[key] = sdkaccess.RegisterProviderOwned(key, adapter)
 		nextKeys[key] = struct{}{}
 		if record.plugin.Capabilities.FrontendAuthProviderExclusive {
 			candidate := exclusiveFrontendAuthCandidate{
@@ -55,32 +60,23 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		}
 	}
 
+	var nextExclusive sdkaccess.ExclusiveProviderRegistration
 	if bestExclusive.key != "" {
-		sdkaccess.SetExclusiveProvider(bestExclusive.key)
-	} else {
-		sdkaccess.ClearExclusiveProvider()
-	}
-	h.pruneStaleAccessProviders(nextKeys)
-}
-
-func (h *Host) pruneStaleAccessProviders(nextKeys map[string]struct{}) {
-	if h == nil {
-		return
+		nextExclusive = sdkaccess.SetExclusiveProviderOwned(nextRegistrations[bestExclusive.key])
 	}
 
-	staleKeys := make([]string, 0)
 	h.mu.Lock()
-	for key := range h.accessProviderKeys {
-		if _, okKey := nextKeys[key]; !okKey {
-			staleKeys = append(staleKeys, key)
-		}
-	}
+	previousRegistrations := h.accessProviderRegistrations
+	previousExclusive := h.exclusiveAccessRegistration
 	h.accessProviderKeys = nextKeys
+	h.accessProviderRegistrations = nextRegistrations
+	h.exclusiveAccessRegistration = nextExclusive
 	h.mu.Unlock()
 
-	for _, key := range staleKeys {
-		sdkaccess.UnregisterProvider(key)
+	for _, registration := range previousRegistrations {
+		sdkaccess.UnregisterProviderOwned(registration)
 	}
+	sdkaccess.ClearExclusiveProviderOwned(previousExclusive)
 }
 
 type accessAdapter struct {

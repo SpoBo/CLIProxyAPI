@@ -51,6 +51,8 @@ type pluginUnloadTarget struct {
 
 type pluginLoadRequest struct {
 	result            chan pluginLoadResult
+	done              chan struct{}
+	doneOnce          sync.Once
 	cleanupStarted    bool
 	closed            bool // Protected by Host.mu; rejects callbacks arriving after cleanup starts.
 	callbackInstances map[*hostCallbackInstance]struct{}
@@ -64,74 +66,81 @@ type pluginLoadResult struct {
 }
 
 type Host struct {
-	applyMu                chan struct{}
-	mu                     sync.Mutex
-	loader                 pluginLoader
-	loaded                 map[string]*loadedPlugin
-	retired                map[string][]*loadedPlugin
-	loading                map[string]*pluginLoadRequest
-	fused                  map[string]string
-	pluginFileVersions     map[string]string
-	activePluginVersions   map[string]string
-	activePluginPaths      map[string]string
-	cleanupFilesPending    bool
-	runtimeConfig          *config.Config
-	requiredBoundary       *requiredSchedulerBoundary
-	authManager            *coreauth.Manager
-	modelExecutor          modelExecutor
-	modelRegistry          modelRegistry
-	executorManager        executorManager
-	modelClientIDs         map[string]struct{}
-	executorModelClientIDs map[string]struct{}
-	modelProviders         map[string]string
-	modelRegistrations     map[string]pluginModelRegistration
-	providerModels         map[string][]*registryModelInfo
-	executorProviders      map[string]struct{}
-	accessProviderKeys     map[string]struct{}
-	usagePluginNames       map[string]struct{}
-	thinkingProviderOwners map[string]struct{}
-	commandLineFlags       map[string]commandLineFlagRecord
-	commandLineHits        map[string]struct{}
-	managementRoutes       map[string]managementRouteRecord
-	resourceRoutes         map[string]resourceRouteRecord
-	streams                *streamBridge
-	httpStreams            *hostHTTPStreamBridge
-	httpOperations         *hostHTTPOperationBridge
-	modelStreams           *modelStreamBridge
-	callbackContexts       *callbackContextRegistry
-	snapshot               atomic.Value
+	applyMu                       chan struct{}
+	mu                            sync.Mutex
+	loader                        pluginLoader
+	loaded                        map[string]*loadedPlugin
+	retired                       map[string][]*loadedPlugin
+	loading                       map[string]*pluginLoadRequest
+	fused                         map[string]string
+	pluginFileVersions            map[string]string
+	activePluginVersions          map[string]string
+	activePluginPaths             map[string]string
+	cleanupFilesPending           bool
+	runtimeConfig                 *config.Config
+	requiredBoundary              *requiredSchedulerBoundary
+	authManager                   *coreauth.Manager
+	modelExecutor                 modelExecutor
+	modelRegistry                 modelRegistry
+	executorManager               executorManager
+	modelClientIDs                map[string]struct{}
+	executorModelClientIDs        map[string]struct{}
+	modelProviders                map[string]string
+	modelRegistrations            map[string]pluginModelRegistration
+	providerModels                map[string][]*registryModelInfo
+	executorProviders             map[string]struct{}
+	accessProviderKeys            map[string]struct{}
+	accessProviderRegistrations   map[string]sdkaccess.ProviderRegistration
+	exclusiveAccessRegistration   sdkaccess.ExclusiveProviderRegistration
+	usagePluginNames              map[string]struct{}
+	usagePluginRegistrations      map[string]coreusage.NamedPluginRegistration
+	thinkingProviderOwners        map[string]struct{}
+	thinkingProviderRegistrations map[string][]thinking.PluginProviderRegistration
+	commandLineFlags              map[string]commandLineFlagRecord
+	commandLineHits               map[string]struct{}
+	managementRoutes              map[string]managementRouteRecord
+	resourceRoutes                map[string]resourceRouteRecord
+	streams                       *streamBridge
+	httpStreams                   *hostHTTPStreamBridge
+	httpOperations                *hostHTTPOperationBridge
+	modelStreams                  *modelStreamBridge
+	callbackContexts              *callbackContextRegistry
+	snapshot                      atomic.Value
 }
 
 func New() *Host {
 	h := &Host{
-		applyMu:                make(chan struct{}, 1),
-		loader:                 defaultPluginLoader(),
-		loaded:                 make(map[string]*loadedPlugin),
-		retired:                make(map[string][]*loadedPlugin),
-		loading:                make(map[string]*pluginLoadRequest),
-		fused:                  make(map[string]string),
-		pluginFileVersions:     make(map[string]string),
-		activePluginVersions:   make(map[string]string),
-		activePluginPaths:      make(map[string]string),
-		cleanupFilesPending:    true,
-		modelClientIDs:         make(map[string]struct{}),
-		executorModelClientIDs: make(map[string]struct{}),
-		modelProviders:         make(map[string]string),
-		modelRegistrations:     make(map[string]pluginModelRegistration),
-		providerModels:         make(map[string][]*registryModelInfo),
-		executorProviders:      make(map[string]struct{}),
-		accessProviderKeys:     make(map[string]struct{}),
-		usagePluginNames:       make(map[string]struct{}),
-		thinkingProviderOwners: make(map[string]struct{}),
-		commandLineFlags:       make(map[string]commandLineFlagRecord),
-		commandLineHits:        make(map[string]struct{}),
-		managementRoutes:       make(map[string]managementRouteRecord),
-		resourceRoutes:         make(map[string]resourceRouteRecord),
-		streams:                newStreamBridge(),
-		httpStreams:            newHostHTTPStreamBridge(),
-		httpOperations:         newHostHTTPOperationBridge(),
-		modelStreams:           newModelStreamBridge(),
-		callbackContexts:       newCallbackContextRegistry(),
+		applyMu:                       make(chan struct{}, 1),
+		loader:                        defaultPluginLoader(),
+		loaded:                        make(map[string]*loadedPlugin),
+		retired:                       make(map[string][]*loadedPlugin),
+		loading:                       make(map[string]*pluginLoadRequest),
+		fused:                         make(map[string]string),
+		pluginFileVersions:            make(map[string]string),
+		activePluginVersions:          make(map[string]string),
+		activePluginPaths:             make(map[string]string),
+		cleanupFilesPending:           true,
+		modelClientIDs:                make(map[string]struct{}),
+		executorModelClientIDs:        make(map[string]struct{}),
+		modelProviders:                make(map[string]string),
+		modelRegistrations:            make(map[string]pluginModelRegistration),
+		providerModels:                make(map[string][]*registryModelInfo),
+		executorProviders:             make(map[string]struct{}),
+		accessProviderKeys:            make(map[string]struct{}),
+		accessProviderRegistrations:   make(map[string]sdkaccess.ProviderRegistration),
+		usagePluginNames:              make(map[string]struct{}),
+		usagePluginRegistrations:      make(map[string]coreusage.NamedPluginRegistration),
+		thinkingProviderOwners:        make(map[string]struct{}),
+		thinkingProviderRegistrations: make(map[string][]thinking.PluginProviderRegistration),
+		commandLineFlags:              make(map[string]commandLineFlagRecord),
+		commandLineHits:               make(map[string]struct{}),
+		managementRoutes:              make(map[string]managementRouteRecord),
+		resourceRoutes:                make(map[string]resourceRouteRecord),
+		streams:                       newStreamBridge(),
+		httpStreams:                   newHostHTTPStreamBridge(),
+		httpOperations:                newHostHTTPOperationBridge(),
+		modelStreams:                  newModelStreamBridge(),
+		callbackContexts:              newCallbackContextRegistry(),
 	}
 	h.snapshot.Store(emptySnapshot())
 	return h
@@ -326,7 +335,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 		var plugin pluginapi.Plugin
 		registeredNow := false
 		if lp == nil {
-			request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1)}
+			request := &pluginLoadRequest{result: make(chan pluginLoadResult, 1), done: make(chan struct{})}
 			h.mu.Lock()
 			if _, loading := h.loading[file.ID]; loading {
 				h.mu.Unlock()
@@ -394,6 +403,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 				return errContext
 			}
 			delete(h.loading, file.ID)
+			if request.done != nil {
+				request.doneOnce.Do(func() { close(request.done) })
+			}
 			lp = loadResult.loaded
 			if replaced != nil {
 				hotReloadFields = pluginHotReloadLogFields(file.ID, file.Version, file.Path, replaced.version, replaced.path)
@@ -494,16 +506,31 @@ func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallb
 	}
 	pluginID = strings.TrimSpace(pluginID)
 	h.mu.Lock()
-	if request := h.loading[pluginID]; request != nil {
-		if request.callbackInstances == nil {
-			request.callbackInstances = make(map[*hostCallbackInstance]struct{})
-		}
-		request.callbackInstances[instance] = struct{}{}
-		if request.closed {
-			instance.closed.Store(true)
-		}
-	}
+	h.registerHostCallbackInstanceLocked(h.loading[pluginID], instance)
 	h.mu.Unlock()
+}
+
+func (h *Host) registerHostCallbackInstanceForRequest(request *pluginLoadRequest, instance *hostCallbackInstance) {
+	if h == nil || instance == nil {
+		return
+	}
+	h.mu.Lock()
+	h.registerHostCallbackInstanceLocked(request, instance)
+	h.mu.Unlock()
+}
+
+func (h *Host) registerHostCallbackInstanceLocked(request *pluginLoadRequest, instance *hostCallbackInstance) {
+	if request == nil {
+		instance.closed.Store(true)
+		return
+	}
+	if request.callbackInstances == nil {
+		request.callbackInstances = make(map[*hostCallbackInstance]struct{})
+	}
+	request.callbackInstances[instance] = struct{}{}
+	if request.closed {
+		instance.closed.Store(true)
+	}
 }
 
 func markPluginLoadClosedLocked(request *pluginLoadRequest) []*hostCallbackInstance {
@@ -533,6 +560,7 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 		ctx = context.Background()
 	}
 	go func() {
+		file.loadRequest = request
 		client, errOpen := h.loader.Open(file, h)
 		if errOpen != nil {
 			request.result <- pluginLoadResult{err: errOpen}
@@ -662,6 +690,9 @@ func (h *Host) clearLoadingRequest(id string, request *pluginLoadRequest) {
 		delete(h.loading, id)
 	}
 	h.mu.Unlock()
+	if request.done != nil {
+		request.doneOnce.Do(func() { close(request.done) })
+	}
 }
 
 func (h *Host) discardLoadedPlugin(loaded *loadedPlugin) {
@@ -777,7 +808,7 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		h.closeHostHTTPPluginResources(target.id, target.callbackInstance)
 	}
 	h.refreshThinkingProviders(records)
-	h.RegisterFrontendAuthProviders()
+	h.registerFrontendAuthProvidersLocked()
 	for _, target := range targets {
 		if target.client != nil {
 			shutdownPluginClient(ctx, target.client)
@@ -818,6 +849,9 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 		return context.Canceled
 	}
 	defer h.unlockApply()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	targets := make([]pluginUnloadTarget, 0)
 	var loading map[string]*pluginLoadRequest
@@ -826,9 +860,10 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	var registeredExecutors executorManager
 	modelClientIDs := make([]string, 0)
 	executorProviders := make([]string, 0)
-	accessProviderKeys := make([]string, 0)
-	usagePluginNames := make([]string, 0)
-	thinkingProviderOwners := make([]string, 0)
+	accessRegistrations := make([]sdkaccess.ProviderRegistration, 0)
+	var exclusiveAccessRegistration sdkaccess.ExclusiveProviderRegistration
+	usageRegistrations := make([]coreusage.NamedPluginRegistration, 0)
+	thinkingRegistrations := make([]thinking.PluginProviderRegistration, 0)
 	h.mu.Lock()
 	loading = make(map[string]*pluginLoadRequest, len(h.loading))
 	for id, request := range h.loading {
@@ -876,14 +911,15 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	for provider := range h.executorProviders {
 		executorProviders = append(executorProviders, provider)
 	}
-	for key := range h.accessProviderKeys {
-		accessProviderKeys = append(accessProviderKeys, key)
+	for _, registration := range h.accessProviderRegistrations {
+		accessRegistrations = append(accessRegistrations, registration)
 	}
-	for name := range h.usagePluginNames {
-		usagePluginNames = append(usagePluginNames, name)
+	exclusiveAccessRegistration = h.exclusiveAccessRegistration
+	for _, registration := range h.usagePluginRegistrations {
+		usageRegistrations = append(usageRegistrations, registration)
 	}
-	for owner := range h.thinkingProviderOwners {
-		thinkingProviderOwners = append(thinkingProviderOwners, owner)
+	for _, registrations := range h.thinkingProviderRegistrations {
+		thinkingRegistrations = append(thinkingRegistrations, registrations...)
 	}
 	h.modelRegistry = nil
 	h.executorManager = nil
@@ -894,8 +930,12 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	h.providerModels = make(map[string][]*registryModelInfo)
 	h.executorProviders = make(map[string]struct{})
 	h.accessProviderKeys = make(map[string]struct{})
+	h.accessProviderRegistrations = make(map[string]sdkaccess.ProviderRegistration)
+	h.exclusiveAccessRegistration = sdkaccess.ExclusiveProviderRegistration{}
 	h.usagePluginNames = make(map[string]struct{})
+	h.usagePluginRegistrations = make(map[string]coreusage.NamedPluginRegistration)
 	h.thinkingProviderOwners = make(map[string]struct{})
+	h.thinkingProviderRegistrations = make(map[string][]thinking.PluginProviderRegistration)
 	h.commandLineFlags = make(map[string]commandLineFlagRecord)
 	h.commandLineHits = make(map[string]struct{})
 	h.managementRoutes = make(map[string]managementRouteRecord)
@@ -923,17 +963,15 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 			}
 		}
 	}
-	for _, key := range accessProviderKeys {
-		sdkaccess.UnregisterProvider(key)
+	for _, registration := range accessRegistrations {
+		sdkaccess.UnregisterProviderOwned(registration)
 	}
-	if len(accessProviderKeys) > 0 {
-		sdkaccess.ClearExclusiveProvider()
+	sdkaccess.ClearExclusiveProviderOwned(exclusiveAccessRegistration)
+	for _, registration := range usageRegistrations {
+		coreusage.UnregisterNamedPluginOwned(registration)
 	}
-	for _, name := range usagePluginNames {
-		coreusage.UnregisterNamedPlugin(name)
-	}
-	for _, owner := range thinkingProviderOwners {
-		thinking.UnregisterPluginProviders(owner)
+	for _, registration := range thinkingRegistrations {
+		thinking.UnregisterPluginProviderOwned(registration)
 	}
 
 	for id, instances := range loadingInstances {
@@ -950,6 +988,11 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	}
 	for id, request := range loading {
 		h.cleanupCanceledPluginLoad(id, request)
+		h.mu.Lock()
+		if h.loading[id] == request {
+			delete(h.loading, id)
+		}
+		h.mu.Unlock()
 	}
 	for _, target := range targets {
 		shutdownPluginClient(ctx, target.client)
@@ -960,6 +1003,19 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	}
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
+	}
+	for _, request := range loading {
+		if request == nil || request.done == nil {
+			continue
+		}
+		select {
+		case <-request.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
 	}
 	return nil
 }
