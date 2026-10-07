@@ -3700,11 +3700,13 @@ func registeredProviderIdentifier(identifier string) bool {
 type fakeModelRegistry struct {
 	clients     map[string]*fakeModelClient
 	unregisters []string
+	nextOwner   uint64
 }
 
 type fakeModelClient struct {
 	provider string
 	models   []*registry.ModelInfo
+	owner    registry.ModelClientRegistration
 }
 
 func newFakeModelRegistry() *fakeModelRegistry {
@@ -3714,15 +3716,32 @@ func newFakeModelRegistry() *fakeModelRegistry {
 }
 
 func (r *fakeModelRegistry) RegisterClient(clientID, clientProvider string, models []*registry.ModelInfo) {
+	_ = r.RegisterClientOwned(clientID, clientProvider, models)
+}
+
+func (r *fakeModelRegistry) RegisterClientOwned(clientID, clientProvider string, models []*registry.ModelInfo) registry.ModelClientRegistration {
+	r.nextOwner++
+	owner := registry.ModelClientRegistration{ClientID: clientID, OwnerID: r.nextOwner}
 	r.clients[clientID] = &fakeModelClient{
 		provider: clientProvider,
 		models:   models,
+		owner:    owner,
 	}
+	return owner
 }
 
 func (r *fakeModelRegistry) UnregisterClient(clientID string) {
 	delete(r.clients, clientID)
 	r.unregisters = append(r.unregisters, clientID)
+}
+
+func (r *fakeModelRegistry) UnregisterClientOwned(owner registry.ModelClientRegistration) bool {
+	client := r.clients[owner.ClientID]
+	if client == nil || client.owner != owner {
+		return false
+	}
+	r.UnregisterClient(owner.ClientID)
+	return true
 }
 
 func (r *fakeModelRegistry) GetModelProviders(modelID string) []string {

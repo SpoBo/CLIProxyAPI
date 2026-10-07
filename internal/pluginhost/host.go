@@ -83,8 +83,8 @@ type Host struct {
 	modelExecutor                 modelExecutor
 	modelRegistry                 modelRegistry
 	executorManager               executorManager
-	modelClientIDs                map[string]struct{}
-	executorModelClientIDs        map[string]struct{}
+	modelClientRegistrations      map[string]modelClientOwnership
+	executorModelRegistrations    map[string]modelClientOwnership
 	modelProviders                map[string]string
 	modelRegistrations            map[string]pluginModelRegistration
 	providerModels                map[string][]*registryModelInfo
@@ -120,8 +120,8 @@ func New() *Host {
 		activePluginVersions:          make(map[string]string),
 		activePluginPaths:             make(map[string]string),
 		cleanupFilesPending:           true,
-		modelClientIDs:                make(map[string]struct{}),
-		executorModelClientIDs:        make(map[string]struct{}),
+		modelClientRegistrations:      make(map[string]modelClientOwnership),
+		executorModelRegistrations:    make(map[string]modelClientOwnership),
 		modelProviders:                make(map[string]string),
 		modelRegistrations:            make(map[string]pluginModelRegistration),
 		providerModels:                make(map[string][]*registryModelInfo),
@@ -856,9 +856,8 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	targets := make([]pluginUnloadTarget, 0)
 	var loading map[string]*pluginLoadRequest
 	loadingInstances := make(map[string][]*hostCallbackInstance)
-	var registeredModels modelRegistry
 	var registeredExecutors executorManager
-	modelClientIDs := make([]string, 0)
+	modelClientRegistrations := make([]modelClientOwnership, 0)
 	executorProviders := make([]string, 0)
 	accessRegistrations := make([]sdkaccess.ProviderRegistration, 0)
 	var exclusiveAccessRegistration sdkaccess.ExclusiveProviderRegistration
@@ -900,13 +899,12 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	}
 	h.loaded = make(map[string]*loadedPlugin)
 	h.retired = make(map[string][]*loadedPlugin)
-	registeredModels = h.modelRegistry
 	registeredExecutors = h.executorManager
-	for clientID := range h.modelClientIDs {
-		modelClientIDs = append(modelClientIDs, clientID)
+	for _, registration := range h.modelClientRegistrations {
+		modelClientRegistrations = append(modelClientRegistrations, registration)
 	}
-	for clientID := range h.executorModelClientIDs {
-		modelClientIDs = append(modelClientIDs, clientID)
+	for _, registration := range h.executorModelRegistrations {
+		modelClientRegistrations = append(modelClientRegistrations, registration)
 	}
 	for provider := range h.executorProviders {
 		executorProviders = append(executorProviders, provider)
@@ -923,8 +921,8 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	}
 	h.modelRegistry = nil
 	h.executorManager = nil
-	h.modelClientIDs = make(map[string]struct{})
-	h.executorModelClientIDs = make(map[string]struct{})
+	h.modelClientRegistrations = make(map[string]modelClientOwnership)
+	h.executorModelRegistrations = make(map[string]modelClientOwnership)
 	h.modelProviders = make(map[string]string)
 	h.modelRegistrations = make(map[string]pluginModelRegistration)
 	h.providerModels = make(map[string][]*registryModelInfo)
@@ -950,10 +948,8 @@ func (h *Host) TeardownContext(ctx context.Context) error {
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
 
-	if registeredModels != nil {
-		for _, clientID := range modelClientIDs {
-			registeredModels.UnregisterClient(clientID)
-		}
+	for _, registration := range modelClientRegistrations {
+		unregisterOwnedModelClient(registration)
 	}
 	if registeredExecutors != nil {
 		for _, provider := range executorProviders {

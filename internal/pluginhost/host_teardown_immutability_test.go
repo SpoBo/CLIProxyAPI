@@ -34,8 +34,8 @@ func TestHostTeardownRequiredSchedulerRemovesRuntimeAndAllowsReuse(t *testing.T)
 	}
 
 	modelRegistry := newFakeModelRegistry()
-	modelRegistry.RegisterClient("plugin:quota-policy:teardown-provider", "teardown-provider", []*registry.ModelInfo{{ID: "teardown-model"}})
-	modelRegistry.RegisterClient("plugin:quota-policy:teardown-provider:executor", "teardown-provider", []*registry.ModelInfo{{ID: "teardown-model"}})
+	modelRegistration := modelRegistry.RegisterClientOwned("plugin:quota-policy:teardown-provider", "teardown-provider", []*registry.ModelInfo{{ID: "teardown-model"}})
+	executorModelRegistration := modelRegistry.RegisterClientOwned("plugin:quota-policy:teardown-provider:executor", "teardown-provider", []*registry.ModelInfo{{ID: "teardown-model"}})
 	executorManager := newFakeExecutorManager()
 	executorManager.RegisterExecutor(&executorAdapter{host: host, pluginID: "quota-policy", provider: "teardown-provider"})
 	accessKey := "plugin:quota-policy:teardown-auth"
@@ -44,8 +44,12 @@ func TestHostTeardownRequiredSchedulerRemovesRuntimeAndAllowsReuse(t *testing.T)
 
 	host.mu.Lock()
 	host.modelRegistry = modelRegistry
-	host.modelClientIDs = map[string]struct{}{"plugin:quota-policy:teardown-provider": {}}
-	host.executorModelClientIDs = map[string]struct{}{"plugin:quota-policy:teardown-provider:executor": {}}
+	host.modelClientRegistrations = map[string]modelClientOwnership{
+		modelRegistration.ClientID: {registry: modelRegistry, registration: modelRegistration},
+	}
+	host.executorModelRegistrations = map[string]modelClientOwnership{
+		executorModelRegistration.ClientID: {registry: modelRegistry, registration: executorModelRegistration},
+	}
 	host.executorManager = executorManager
 	host.executorProviders = map[string]struct{}{"teardown-provider": {}}
 	host.accessProviderKeys = map[string]struct{}{accessKey: {}}

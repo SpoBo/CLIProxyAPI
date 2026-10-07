@@ -191,6 +191,10 @@ type ModelRegistry struct {
 	clientEpochs map[string]uint64
 	// clientGenerations tracks the latest generation applied for each client ID
 	clientGenerations map[string]uint64
+	// clientOwners identifies the exact registration currently published for a
+	// client ID. This prevents an old owner from removing a replacement.
+	clientOwners    map[string]uint64
+	nextClientOwner uint64
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
 	// availableModelsCache stores per-handler snapshots for GetAvailableModels.
@@ -201,6 +205,13 @@ type ModelRegistry struct {
 	registrationEpoch atomic.Uint64
 	// hook is an optional callback sink for model registration changes
 	hook ModelRegistryHook
+}
+
+// ModelClientRegistration identifies one exact client publication. Callers must
+// pass it back unchanged when conditionally removing their registration.
+type ModelClientRegistration struct {
+	ClientID string
+	OwnerID  uint64
 }
 
 // Global model registry instance
@@ -432,9 +443,25 @@ func (r *ModelRegistry) triggerModelsUnregistered(provider, clientID string) {
 //   - clientProvider: Provider name (e.g., "gemini", "claude", "openai")
 //   - models: List of models that this client can provide
 func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models []*ModelInfo) {
+	_ = r.RegisterClientOwned(clientID, clientProvider, models)
+}
+
+// RegisterClientOwned registers a client and returns the identity of this exact
+// publication. Reusing a client ID replaces its ownership identity.
+func (r *ModelRegistry) RegisterClientOwned(clientID, clientProvider string, models []*ModelInfo) ModelClientRegistration {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
+	if r.clientOwners == nil {
+		r.clientOwners = make(map[string]uint64)
+	}
+	r.nextClientOwner++
+	if r.nextClientOwner == 0 {
+		r.nextClientOwner++
+	}
+	registration := ModelClientRegistration{ClientID: clientID, OwnerID: r.nextClientOwner}
+	r.clientOwners[clientID] = registration.OwnerID
 	r.registerClientLocked(clientID, clientProvider, models, false)
+	return registration
 }
 
 // ReplaceClientModels replaces a client's models only if its registration epoch matches.
@@ -849,8 +876,24 @@ func (r *ModelRegistry) UnregisterClient(clientID string) {
 	r.invalidateAvailableModelsCacheLocked()
 }
 
+// UnregisterClientOwned removes a client only if registration identifies the
+// exact publication currently stored for the client ID.
+func (r *ModelRegistry) UnregisterClientOwned(registration ModelClientRegistration) bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if registration.ClientID == "" || registration.OwnerID == 0 || r.clientOwners[registration.ClientID] != registration.OwnerID {
+		return false
+	}
+	r.unregisterClientInternal(registration.ClientID)
+	r.invalidateAvailableModelsCacheLocked()
+	return true
+}
+
 // unregisterClientInternal performs the actual client unregistration (internal, no locking)
 func (r *ModelRegistry) unregisterClientInternal(clientID string) {
+	if r.clientOwners != nil {
+		delete(r.clientOwners, clientID)
+	}
 	if r.clientGenerations == nil {
 		r.clientGenerations = make(map[string]uint64)
 	}

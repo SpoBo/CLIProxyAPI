@@ -16,8 +16,13 @@ import (
 type registryModelInfo = registry.ModelInfo
 
 type modelRegistry interface {
-	RegisterClient(clientID, clientProvider string, models []*registry.ModelInfo)
-	UnregisterClient(clientID string)
+	RegisterClientOwned(clientID, clientProvider string, models []*registry.ModelInfo) registry.ModelClientRegistration
+	UnregisterClientOwned(registration registry.ModelClientRegistration) bool
+}
+
+type modelClientOwnership struct {
+	registry     modelRegistry
+	registration registry.ModelClientRegistration
 }
 
 type modelProviderRegistry interface {
@@ -226,14 +231,17 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 }
 
 func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) {
-	if h == nil || modelRegistry == nil {
+	if h == nil || modelRegistry == nil || !h.lockApply(ctx) {
 		return
+	}
+	defer h.unlockApply()
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	snap := h.Snapshot()
 	records := h.activeRecordsFromSnapshot(snap)
 	registrations := make([]modelClientRegistration, 0)
-	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
 	for _, record := range records {
@@ -295,10 +303,9 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 				provider: provider,
 				models:   models,
 			})
-			nextClients[clientID] = struct{}{}
 		}
 	}
-	h.commitModelClients(snap, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
+	h.commitModelClients(snap, modelRegistry, registrations, nextProviders, nextModelRegistrations)
 }
 
 // HasAuthModelProvider reports whether an active plugin declares per-auth model
