@@ -19,6 +19,29 @@ func TestBuilderValidatesRequiredSchedulerConfig(t *testing.T) {
 	}
 }
 
+func TestBuilderRejectsHomeWithRequiredScheduler(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Enabled:           true,
+			Dir:               t.TempDir(),
+			RequiredScheduler: "quota-policy",
+			Configs: map[string]config.PluginInstanceConfig{
+				"quota-policy": {Enabled: &enabled},
+			},
+		},
+	}
+
+	service, errBuild := NewBuilder().WithConfig(cfg).WithConfigPath(t.TempDir() + "/config.yaml").Build()
+	if errBuild == nil || !strings.Contains(errBuild.Error(), "Home") {
+		t.Fatalf("Build() error = %v, want Home and required scheduler incompatibility", errBuild)
+	}
+	if service != nil {
+		t.Fatal("Build() returned a service for incompatible Home and required scheduler config")
+	}
+}
+
 func TestBuilderRejectsUnavailableRequiredScheduler(t *testing.T) {
 	enabled := true
 	cfg := &config.Config{

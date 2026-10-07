@@ -516,9 +516,12 @@ type SchedulerAuthCandidate struct {
 	Provider string
 	// Priority is the host priority assigned to the auth record.
 	Priority int
+	// Weight is the normalized host routing weight assigned to the auth record.
+	Weight int64
 	// Status is the current host-visible auth status.
 	Status string
-	// Attributes contains a cloned subset of non-sensitive routing attributes.
+	// Attributes is reserved for bounded, host-derived routing attributes. The native
+	// host currently leaves it empty rather than forwarding auth attribute strings.
 	Attributes map[string]string
 	// Metadata is reserved for explicitly plugin-safe host context. The native host
 	// does not populate it from auth metadata.

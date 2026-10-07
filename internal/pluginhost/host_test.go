@@ -7,6 +7,7 @@ import (
 
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -154,6 +155,30 @@ func TestHostApplyConfig_RequiredSchedulerMustLoadAndRegisterCapability(t *testi
 				t.Fatalf("ApplyConfig() error = %v, want required scheduler failure", errApply)
 			}
 		})
+	}
+}
+
+func TestHostApplyConfig_DiscoveryFailurePublishesRequiredSchedulerRejection(t *testing.T) {
+	nonDirectory := filepath.Join(t.TempDir(), "not-a-plugin-directory")
+	if errWrite := os.WriteFile(nonDirectory, []byte("invalid plugin discovery root"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	h := NewForTest(newTestSymbolLoader())
+
+	errApply := h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{
+		Enabled:           true,
+		Dir:               nonDirectory,
+		RequiredScheduler: "quota-policy",
+		Configs:           enabledPluginConfigs("quota-policy"),
+	}})
+	if errApply == nil {
+		t.Fatal("ApplyConfig() error = nil, want discovery failure")
+	}
+	if required := h.requiredScheduler(); required != "quota-policy" {
+		t.Fatalf("requiredScheduler() = %q, want quota-policy", required)
+	}
+	if _, handled, errPick := h.PickAuth(context.Background(), schedulerRequest("native-fallback")); errPick == nil || !handled {
+		t.Fatalf("PickAuth() handled/error = %v/%v, want fail-closed required scheduler rejection", handled, errPick)
 	}
 }
 

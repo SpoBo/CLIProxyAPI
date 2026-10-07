@@ -14,6 +14,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
@@ -28,7 +29,7 @@ func TestServiceApplyConfigRuntimeRejectsRequiredSchedulerFailures(t *testing.T)
 		{name: "scheduler capability missing", registration: `{"ok":true,"result":{"schema_version":6,"metadata":{"name":"quota-policy","version":"1.0.0"},"capabilities":{}}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			pluginsDir := requiredSchedulerPluginDir(t, test.registration, test.invalidFile)
+			pluginsDir := requiredSchedulerPluginDir(t, test.registration, "", test.invalidFile)
 			enabled := true
 			cfg := &config.Config{
 				ClaudeKey: []config.ClaudeKey{{APIKey: "must-not-register"}},
@@ -57,6 +58,68 @@ func TestServiceApplyConfigRuntimeRejectsRequiredSchedulerFailures(t *testing.T)
 	}
 }
 
+func TestFailedRequiredSchedulerDiscoveryHotApplyCannotRestoreNativeSelection(t *testing.T) {
+	registration := `{"ok":true,"result":{"schema_version":6,"metadata":{"Name":"quota-policy","Version":"1.0.0","Author":"test","GitHubRepository":"https://github.com/router-for-me/CLIProxyAPI"},"capabilities":{"scheduler":true}}}`
+	schedulerResponse := `{"ok":true,"result":{"handled":true,"reject":true,"reject_code":"policy_denied","reject_reason":"fixture policy rejection"}}`
+	pluginsDir := requiredSchedulerPluginDir(t, registration, schedulerResponse, false)
+	enabled := true
+	validCfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled:           true,
+		Dir:               pluginsDir,
+		RequiredScheduler: "quota-policy",
+		Configs: map[string]config.PluginInstanceConfig{
+			"quota-policy": {Enabled: &enabled},
+		},
+	}}
+	host := pluginhost.New()
+	t.Cleanup(host.ShutdownAll)
+	if errApply := host.ApplyConfig(context.Background(), validCfg); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(serviceTestPluginExecutor{})
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{ID: "native-fallback", Provider: "plugin-provider", Status: coreauth.StatusActive}); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	manager.SetPluginScheduler(host)
+	if selected, errSelect := manager.SelectAuth(context.Background(), "plugin-provider", "", cliproxyexecutor.Options{}); errSelect == nil || selected != nil {
+		t.Fatalf("initial required scheduler selection = %#v, %v; want policy rejection", selected, errSelect)
+	}
+	activeSnapshot := host.Snapshot()
+
+	nonDirectory := filepath.Join(t.TempDir(), "not-a-plugin-directory")
+	if errWrite := os.WriteFile(nonDirectory, []byte("invalid plugin discovery root"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile(non-directory) error = %v", errWrite)
+	}
+	failedCfg := *validCfg
+	failedCfg.Plugins = validCfg.Plugins
+	failedCfg.Plugins.Dir = nonDirectory
+	if errApply := host.ApplyConfig(context.Background(), &failedCfg); errApply == nil {
+		t.Fatal("hot ApplyConfig() error = nil, want plugin discovery failure")
+	}
+	if host.Snapshot() != activeSnapshot {
+		t.Fatal("failed hot apply replaced the active required-scheduler snapshot")
+	}
+
+	if selected, errSelect := manager.SelectAuth(context.Background(), "plugin-provider", "", cliproxyexecutor.Options{}); errSelect == nil || selected != nil {
+		t.Fatalf("selection after failed hot apply = %#v, %v; native fallback was re-enabled", selected, errSelect)
+	}
+
+	manager.SetConfig(validCfg)
+	service := &Service{cfg: validCfg, coreManager: manager, pluginHost: host}
+	incompatible := *validCfg
+	incompatible.Home.Enabled = true
+	if service.applyConfigUpdateWithAuthSynthesis(context.Background(), &incompatible, false) {
+		t.Fatal("runtime hot apply accepted Home with a required scheduler")
+	}
+	if manager.HomeEnabled() {
+		t.Fatal("rejected runtime hot apply enabled Home dispatch")
+	}
+	if selected, errSelect := manager.SelectAuth(context.Background(), "plugin-provider", "", cliproxyexecutor.Options{}); errSelect == nil || selected != nil {
+		t.Fatalf("selection after rejected Home hot apply = %#v, %v; Home bypassed required scheduler", selected, errSelect)
+	}
+}
+
 func TestServiceApplyConfigRuntimeKeepsDefaultWithoutPluginHost(t *testing.T) {
 	service := &Service{cfg: &config.Config{}, coreManager: coreauth.NewManager(nil, nil, nil)}
 	commit := service.commitConfigUpdate(&config.Config{})
@@ -66,7 +129,7 @@ func TestServiceApplyConfigRuntimeKeepsDefaultWithoutPluginHost(t *testing.T) {
 	}
 }
 
-func requiredSchedulerPluginDir(t *testing.T, registration string, invalidFile bool) string {
+func requiredSchedulerPluginDir(t *testing.T, registration string, schedulerResponse string, invalidFile bool) string {
 	t.Helper()
 	root := t.TempDir()
 	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
@@ -99,13 +162,15 @@ typedef struct {
 } cliproxy_plugin_api;
 
 static const char *registration = %s;
+static const char *scheduler_response = %s;
 
 static int fixture_call(const char *method, const uint8_t *request, size_t request_len, cliproxy_buffer *response) {
-    (void)method; (void)request; (void)request_len;
-    size_t len = strlen(registration);
+    (void)request; (void)request_len;
+    const char *payload = strcmp(method, "scheduler.pick") == 0 ? scheduler_response : registration;
+    size_t len = strlen(payload);
     response->ptr = malloc(len);
     response->len = len;
-    memcpy(response->ptr, registration, len);
+    memcpy(response->ptr, payload, len);
     return 0;
 }
 
@@ -119,7 +184,7 @@ int cliproxy_plugin_init(const void *host, cliproxy_plugin_api *plugin) {
     plugin->shutdown = NULL;
     return 0;
 }
-`, strconv.Quote(registration))
+`, strconv.Quote(registration), strconv.Quote(schedulerResponse))
 	sourcePath := filepath.Join(t.TempDir(), "plugin.c")
 	if errWrite := os.WriteFile(sourcePath, []byte(source), 0o644); errWrite != nil {
 		t.Fatalf("WriteFile(source) error = %v", errWrite)

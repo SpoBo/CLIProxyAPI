@@ -225,12 +225,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 		log.WithError(errRuntimeConfig).Error("failed to apply plugin runtime config")
 		return errRuntimeConfig
 	}
-	h.mu.Lock()
-	h.runtimeConfig = cfg
-	h.mu.Unlock()
-
 	if !rc.Enabled {
 		h.mu.Lock()
+		h.runtimeConfig = cfg
 		h.managementRoutes = make(map[string]managementRouteRecord)
 		h.resourceRoutes = make(map[string]resourceRouteRecord)
 		h.rebuildActivePluginMapsLocked(nil)
@@ -244,18 +241,23 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	files, errSelect := selectPluginFiles(rc.Dir, desiredVersions)
 	if errSelect != nil {
 		log.Warnf("pluginhost: failed to select plugin files: %v", errSelect)
-		h.mu.Lock()
-		h.managementRoutes = make(map[string]managementRouteRecord)
-		h.resourceRoutes = make(map[string]resourceRouteRecord)
-		h.rebuildActivePluginMapsLocked(nil)
-		h.snapshot.Store(emptySnapshot())
-		h.mu.Unlock()
-		h.refreshThinkingProviders(nil)
 		if required := strings.TrimSpace(cfg.Plugins.RequiredScheduler); required != "" {
+			prior := h.Snapshot()
+			if strings.TrimSpace(prior.requiredScheduler) == "" {
+				h.snapshot.Store(&Snapshot{
+					enabled:                 prior.enabled,
+					records:                 append([]capabilityRecord(nil), prior.records...),
+					requiredScheduler:       required,
+					quotaSupportedProviders: make(map[string][]string),
+				})
+			}
 			return fmt.Errorf("required scheduler %q could not be discovered: %w", required, errSelect)
 		}
 		return nil
 	}
+	h.mu.Lock()
+	h.runtimeConfig = cfg
+	h.mu.Unlock()
 	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
 
 	records := make([]capabilityRecord, 0, len(files))

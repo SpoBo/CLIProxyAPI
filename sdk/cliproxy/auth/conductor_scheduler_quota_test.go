@@ -71,8 +71,8 @@ func TestSchedulerAuthCandidatesExposeOnlySafeQuotaObservations(t *testing.T) {
 	if candidate.ModelQuota == nil || !candidate.ModelQuota.ObservedAt.Equal(modelObservedAt) || !reflect.DeepEqual(candidate.ModelQuota.Signals, auth.ModelStates["gpt-5.4"].Quota.Signals) {
 		t.Fatalf("candidate.ModelQuota = %#v, want requested-model quota", candidate.ModelQuota)
 	}
-	if !reflect.DeepEqual(candidate.Attributes, map[string]string{"region": "us-east"}) {
-		t.Fatalf("candidate.Attributes = %#v, want only safe routing attributes", candidate.Attributes)
+	if candidate.Attributes != nil {
+		t.Fatalf("candidate.Attributes = %#v, want nil", candidate.Attributes)
 	}
 	if candidate.Metadata != nil {
 		t.Fatalf("candidate.Metadata = %#v, want nil", candidate.Metadata)
@@ -89,7 +89,6 @@ func TestSchedulerAuthCandidatesExposeOnlySafeQuotaObservations(t *testing.T) {
 
 	candidate.Quota.Signals["X-Codex-Primary-Used-Percent"] = "mutated"
 	candidate.ModelQuota.Signals["X-Codex-Primary-Used-Percent"] = "mutated"
-	candidate.Attributes["region"] = "mutated"
 	if auth.Quota.Signals["X-Codex-Primary-Used-Percent"] != "72" ||
 		auth.ModelStates["gpt-5.4"].Quota.Signals["X-Codex-Primary-Used-Percent"] != "83" ||
 		auth.Attributes["region"] != "us-east" {
@@ -120,8 +119,8 @@ func TestSchedulerAuthCandidatesExcludePluginVirtualSourceAndStorage(t *testing.
 		t.Fatalf("schedulerAuthCandidates() len = %d, want 1", len(candidates))
 	}
 	candidate := candidates[0]
-	if !reflect.DeepEqual(candidate.Attributes, map[string]string{"region": "us-east"}) {
-		t.Fatalf("candidate.Attributes = %#v, want only explicitly safe routing attributes", candidate.Attributes)
+	if candidate.Attributes != nil {
+		t.Fatalf("candidate.Attributes = %#v, want nil", candidate.Attributes)
 	}
 	for _, key := range []string{AttributeAuthIndexSeed, AttributePluginVirtual, AttributeVirtualSource, "host_internal_id"} {
 		if _, ok := candidate.Attributes[key]; ok {
@@ -137,5 +136,56 @@ func TestSchedulerAuthCandidatesExcludePluginVirtualSourceAndStorage(t *testing.
 		if strings.Contains(string(rawCandidate), privateValue) {
 			t.Fatalf("serialized scheduler candidate exposed host-private value %q: %s", privateValue, rawCandidate)
 		}
+	}
+}
+
+func TestSchedulerAuthCandidatesExcludeEveryPreviouslyAllowlistedAttributeValue(t *testing.T) {
+	markers := map[string]string{
+		"priority":      "token-priority-secret",
+		AttributeWeight: "owner@example.com",
+		"region":        "/srv/private/credentials.json",
+		"team":          "scheduler-storage-sentinel",
+	}
+	auth := &Auth{
+		ID:         "auth-sensitive-attributes",
+		Provider:   "codex",
+		Attributes: markers,
+	}
+
+	candidates := schedulerAuthCandidates([]*Auth{auth}, "gpt-5.4")
+	if len(candidates) != 1 {
+		t.Fatalf("schedulerAuthCandidates() len = %d, want 1", len(candidates))
+	}
+	candidate := candidates[0]
+	if candidate.Attributes != nil {
+		t.Fatalf("candidate.Attributes = %#v, want nil", candidate.Attributes)
+	}
+	rawCandidate, errMarshal := json.Marshal(candidate)
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal(candidate) error = %v", errMarshal)
+	}
+	for key, marker := range markers {
+		if strings.Contains(string(rawCandidate), marker) {
+			t.Fatalf("serialized scheduler candidate exposed %s marker %q: %s", key, marker, rawCandidate)
+		}
+	}
+}
+
+func TestSchedulerAuthCandidatesExposePriorityAndWeightAsTypedFields(t *testing.T) {
+	auth := &Auth{
+		ID:       "auth-routing-fields",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"priority":      "17",
+			AttributeWeight: "23",
+		},
+	}
+
+	candidate := schedulerAuthCandidates([]*Auth{auth}, "gpt-5.4")[0]
+	if candidate.Priority != 17 || candidate.Weight != 23 {
+		t.Fatalf("candidate priority/weight = %d/%d, want 17/23", candidate.Priority, candidate.Weight)
+	}
+	if candidate.Attributes != nil {
+		t.Fatalf("candidate.Attributes = %#v, want nil", candidate.Attributes)
 	}
 }

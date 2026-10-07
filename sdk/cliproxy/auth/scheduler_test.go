@@ -1172,15 +1172,15 @@ func TestManagerPluginSchedulerAcrossPrioritiesAttributesAndCooldownFilter(t *te
 	if !okHigh {
 		t.Fatalf("missing high-act candidate")
 	}
-	if cHigh.Priority != 10 || cHigh.Attributes["weight"] != "100" {
-		t.Fatalf("high-act priority/weight mismatch: Priority=%d, weight=%s", cHigh.Priority, cHigh.Attributes["weight"])
+	if cHigh.Priority != 10 || cHigh.Weight != 100 || cHigh.Attributes != nil {
+		t.Fatalf("high-act priority/weight/attributes mismatch: Priority=%d, Weight=%d, Attributes=%#v", cHigh.Priority, cHigh.Weight, cHigh.Attributes)
 	}
 	cLow, okLow := candidateMap["low-act"]
 	if !okLow {
 		t.Fatalf("missing low-act candidate")
 	}
-	if cLow.Priority != 5 || cLow.Attributes["weight"] != "50" {
-		t.Fatalf("low-act priority/weight mismatch: Priority=%d, weight=%s", cLow.Priority, cLow.Attributes["weight"])
+	if cLow.Priority != 5 || cLow.Weight != 50 || cLow.Attributes != nil {
+		t.Fatalf("low-act priority/weight/attributes mismatch: Priority=%d, Weight=%d, Attributes=%#v", cLow.Priority, cLow.Weight, cLow.Attributes)
 	}
 }
 
@@ -2032,18 +2032,12 @@ func TestManagerPluginSchedulerCandidatesAreSafeCopies(t *testing.T) {
 			if candidate.ID != "auth-a" || candidate.Provider != "gemini" || candidate.Priority != 7 || candidate.Status != string(StatusActive) {
 				t.Fatalf("scheduler candidate = %#v, want sanitized auth-a metadata", candidate)
 			}
-			for _, key := range []string{"access_token", "api_key", "cookie"} {
-				if _, ok := candidate.Attributes[key]; ok {
-					t.Fatalf("scheduler candidate Attributes contains sensitive key %q", key)
-				}
-			}
-			if candidate.Attributes["priority"] != "7" {
-				t.Fatalf("scheduler candidate priority attribute = %q, want 7", candidate.Attributes["priority"])
+			if candidate.Attributes != nil {
+				t.Fatalf("scheduler candidate Attributes = %#v, want nil", candidate.Attributes)
 			}
 			if len(candidate.Metadata) != 0 {
 				t.Fatalf("scheduler candidate Metadata = %#v, want empty", candidate.Metadata)
 			}
-			candidate.Attributes["team"] = "mutated"
 			req.Candidates[0] = candidate
 			return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
 		},

@@ -115,6 +115,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
+	if errValidate := newCfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with invalid required scheduler policy")
+		return configCommit{}
+	}
 
 	if errValidate := newCfg.Models.Validate(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected invalid model catalog sources")

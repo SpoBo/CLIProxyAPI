@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -64,6 +65,32 @@ func TestServiceSyncPluginRuntimeConfigRejectsUnavailableRequiredScheduler(t *te
 
 	if ok := service.syncPluginRuntimeConfig(context.Background()); ok {
 		t.Fatal("syncPluginRuntimeConfig() = true, want false")
+	}
+}
+
+func TestServiceCommitConfigUpdateRejectsHomeWithRequiredScheduler(t *testing.T) {
+	enabled := true
+	current := &config.Config{}
+	service := &Service{cfg: current}
+	incompatible := &config.Config{
+		Home: internalconfig.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Enabled:           true,
+			RequiredScheduler: "quota-policy",
+			Configs: map[string]config.PluginInstanceConfig{
+				"quota-policy": {Enabled: &enabled},
+			},
+		},
+	}
+
+	if commit := service.commitConfigUpdate(incompatible); commit.cfg != nil {
+		t.Fatalf("commitConfigUpdate() = %#v, want rejected config", commit)
+	}
+	service.cfgMu.RLock()
+	got := service.cfg
+	service.cfgMu.RUnlock()
+	if got != current || got.Home.Enabled {
+		t.Fatalf("rejected hot apply published incompatible config: %#v", got)
 	}
 }
 

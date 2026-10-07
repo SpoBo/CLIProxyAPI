@@ -11,10 +11,13 @@ import (
 // ValidateRequiredSchedulerConfig verifies that a required scheduler can be considered for loading.
 // Capability registration is validated by the plugin host after loading.
 func (cfg *Config) ValidateRequiredSchedulerConfig() error {
-	if cfg == nil || cfg.Plugins.RequiredScheduler == "" {
+	if cfg == nil || strings.TrimSpace(cfg.Plugins.RequiredScheduler) == "" {
 		return nil
 	}
-	required := cfg.Plugins.RequiredScheduler
+	required := strings.TrimSpace(cfg.Plugins.RequiredScheduler)
+	if cfg.Home.Enabled {
+		return fmt.Errorf("required scheduler %q is incompatible with Home", required)
+	}
 	if !cfg.Plugins.Enabled {
 		return fmt.Errorf("required scheduler %q needs plugins.enabled", required)
 	}

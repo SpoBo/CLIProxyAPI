@@ -784,30 +784,6 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 	return latestAuthErr
 }
 
-var schedulerSafeAttributeKeys = map[string]struct{}{
-	"priority":      {},
-	AttributeWeight: {},
-	"region":        {},
-	"team":          {},
-}
-
-func schedulerSafeAttributes(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(schedulerSafeAttributeKeys))
-	for key, value := range src {
-		if _, ok := schedulerSafeAttributeKeys[key]; !ok {
-			continue
-		}
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func cloneSchedulerAnyMap(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
@@ -855,12 +831,12 @@ func schedulerAuthCandidates(auths []*Auth, model string) []pluginapi.SchedulerA
 			continue
 		}
 		candidate := pluginapi.SchedulerAuthCandidate{
-			ID:         auth.ID,
-			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
-			Priority:   authPriority(auth),
-			Status:     string(auth.Status),
-			Attributes: schedulerSafeAttributes(auth.Attributes),
-			Quota:      schedulerQuotaObservation(auth.Provider, auth.Quota),
+			ID:       auth.ID,
+			Provider: strings.ToLower(strings.TrimSpace(auth.Provider)),
+			Priority: authPriority(auth),
+			Weight:   authWeight(auth),
+			Status:   string(auth.Status),
+			Quota:    schedulerQuotaObservation(auth.Provider, auth.Quota),
 		}
 		modelKey := canonicalModelKey(model)
 		if state := auth.ModelStates[model]; state != nil {
