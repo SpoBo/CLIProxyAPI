@@ -46,6 +46,27 @@ func TestServiceSyncPluginRuntimeConfigInjectsPluginHostScheduler(t *testing.T) 
 	}
 }
 
+func TestServiceSyncPluginRuntimeConfigRejectsUnavailableRequiredScheduler(t *testing.T) {
+	enabled := true
+	host := pluginhost.New()
+	service := &Service{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Enabled:           true,
+			Dir:               t.TempDir(),
+			RequiredScheduler: "quota-policy",
+			Configs: map[string]config.PluginInstanceConfig{
+				"quota-policy": {Enabled: &enabled},
+			},
+		}},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+		pluginHost:  host,
+	}
+
+	if ok := service.syncPluginRuntimeConfig(context.Background()); ok {
+		t.Fatal("syncPluginRuntimeConfig() = true, want false")
+	}
+}
+
 func TestServiceSyncPluginRuntimeConfigClearsPluginSchedulerWithoutHost(t *testing.T) {
 	host := pluginhost.New()
 	service := &Service{

@@ -800,6 +800,11 @@ func schedulerAttributeSensitive(key string) bool {
 		"authorization",
 		"auth_header",
 		"proxy_url",
+		"email",
+		"filename",
+		"file_name",
+		"path",
+		"source",
 	} {
 		if strings.Contains(key, fragment) || strings.Contains(normalized, fragment) || strings.Contains(compact, fragment) {
 			return true
@@ -850,7 +855,19 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 	return out
 }
 
-func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+func schedulerQuotaObservation(provider string, quota QuotaState) pluginapi.SchedulerQuotaObservation {
+	observation := pluginapi.SchedulerQuotaObservation{ObservedAt: quota.ObservedAt}
+	if len(quota.Signals) > 0 {
+		headers := make(http.Header, len(quota.Signals))
+		for key, value := range quota.Signals {
+			headers.Set(key, value)
+		}
+		observation.Signals = collectQuotaSignals(provider, headers)
+	}
+	return observation
+}
+
+func schedulerAuthCandidates(auths []*Auth, model string) []pluginapi.SchedulerAuthCandidate {
 	if len(auths) == 0 {
 		return nil
 	}
@@ -859,13 +876,23 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 		if auth == nil {
 			continue
 		}
-		out = append(out, pluginapi.SchedulerAuthCandidate{
+		candidate := pluginapi.SchedulerAuthCandidate{
 			ID:         auth.ID,
 			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
 			Priority:   authPriority(auth),
 			Status:     string(auth.Status),
 			Attributes: schedulerSafeAttributes(auth.Attributes),
-		})
+			Quota:      schedulerQuotaObservation(auth.Provider, auth.Quota),
+		}
+		modelKey := canonicalModelKey(model)
+		if state := auth.ModelStates[model]; state != nil {
+			observation := schedulerQuotaObservation(auth.Provider, state.Quota)
+			candidate.ModelQuota = &observation
+		} else if state := auth.ModelStates[modelKey]; state != nil {
+			observation := schedulerQuotaObservation(auth.Provider, state.Quota)
+			candidate.ModelQuota = &observation
+		}
+		out = append(out, candidate)
 	}
 	return out
 }
@@ -965,7 +992,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: schedulerAuthCandidates(candidates, model),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {

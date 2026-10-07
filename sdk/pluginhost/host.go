@@ -28,6 +28,7 @@ type OAuthModelAlias struct {
 type RuntimeConfig struct {
 	Enabled             bool
 	Dir                 string
+	RequiredScheduler   string
 	AuthDir             string
 	ProxyURL            string
 	ForceModelPrefix    bool
@@ -68,13 +69,13 @@ func New() *Host {
 	return &Host{inner: internalpluginhost.New()}
 }
 
-// ApplyConfig applies plugin runtime configuration.
-func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) {
+// ApplyConfig applies plugin runtime configuration and validates any required scheduler.
+func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) error {
 	if h == nil || h.inner == nil {
-		return
+		return context.Canceled
 	}
 	internalCfg := runtimeConfigToInternalConfig(cfg)
-	h.inner.ApplyConfig(ctx, internalCfg)
+	return h.inner.ApplyConfig(ctx, internalCfg)
 }
 
 // ShutdownAll unloads every active plugin.
@@ -221,9 +222,10 @@ func runtimeConfigToInternalConfig(cfg RuntimeConfig) *internalconfig.Config {
 		OAuthExcludedModels: cloneStringSliceMap(cfg.OAuthExcludedModels),
 		OAuthModelAlias:     oauthModelAliasToInternal(cfg.OAuthModelAlias),
 		Plugins: internalconfig.PluginsConfig{
-			Enabled: cfg.Enabled,
-			Dir:     cfg.Dir,
-			Configs: pluginConfigsToInternal(cfg.Configs),
+			Enabled:           cfg.Enabled,
+			Dir:               cfg.Dir,
+			RequiredScheduler: cfg.RequiredScheduler,
+			Configs:           pluginConfigsToInternal(cfg.Configs),
 		},
 	}
 	out.NormalizePluginsConfig()

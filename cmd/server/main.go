@@ -678,7 +678,10 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
-	pluginHost.ApplyConfig(context.Background(), cfg)
+	if errApplyPlugins := pluginHost.ApplyConfig(context.Background(), cfg); errApplyPlugins != nil {
+		log.Errorf("failed to apply plugin configuration: %v", errApplyPlugins)
+		return
+	}
 	if configLoadedFromHome && homePluginStatusReady {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
 		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)

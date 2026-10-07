@@ -31,6 +31,59 @@ plugins: {}
 	}
 }
 
+func TestParseConfigBytes_RequiredScheduler(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  enabled: true
+  required-scheduler: " quota-policy "
+  configs:
+    quota-policy:
+      enabled: true
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Plugins.RequiredScheduler != "quota-policy" {
+		t.Fatalf("Plugins.RequiredScheduler = %q, want quota-policy", cfg.Plugins.RequiredScheduler)
+	}
+}
+
+func TestParseConfigBytes_RequiredSchedulerMustBeEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		yaml string
+	}{
+		{name: "plugins disabled", yaml: `plugins: {required-scheduler: quota-policy}`},
+		{name: "plugin config missing", yaml: `plugins: {enabled: true, required-scheduler: quota-policy}`},
+		{name: "plugin disabled", yaml: `
+plugins:
+  enabled: true
+  required-scheduler: quota-policy
+  configs:
+    quota-policy:
+      enabled: false
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, errParse := ParseConfigBytes([]byte(test.yaml))
+			if errParse == nil || !strings.Contains(errParse.Error(), "required scheduler") {
+				t.Fatalf("ParseConfigBytes() error = %v, want required scheduler validation error", errParse)
+			}
+		})
+	}
+}
+
+func TestValidateV8Config_RequiredSchedulerMustBeEnabled(t *testing.T) {
+	errValidate := ValidateV8Config([]byte(`
+config-version: 8
+plugins:
+  required-scheduler: quota-policy
+`))
+	if errValidate == nil || !strings.Contains(errValidate.Error(), "required scheduler") {
+		t.Fatalf("ValidateV8Config() error = %v, want required scheduler validation error", errValidate)
+	}
+}
+
 func TestParseConfigBytes_PluginsDirExpandsLeadingTilde(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

@@ -25,7 +25,12 @@ func (h *Host) RegisterPluginForTest(id string, plugin pluginapi.Plugin) {
 	records := append(h.activeRecords(), record)
 	h.mu.Lock()
 	h.rebuildActivePluginMapsLocked(records)
-	h.snapshot.Store(&Snapshot{enabled: true, records: records, quotaSupportedProviders: make(map[string][]string)})
+	h.snapshot.Store(&Snapshot{
+		enabled:                 true,
+		records:                 records,
+		requiredScheduler:       h.Snapshot().requiredScheduler,
+		quotaSupportedProviders: make(map[string][]string),
+	})
 	h.mu.Unlock()
 }
 

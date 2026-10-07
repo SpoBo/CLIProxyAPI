@@ -913,5 +913,10 @@ func ValidateV8Config(data []byte) error {
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
 		return errDecode
 	}
-	return cfg.Models.Validate()
+	if errModels := cfg.Models.Validate(); errModels != nil {
+		return errModels
+	}
+	runtimeCfg := Config(cfg)
+	runtimeCfg.NormalizePluginsConfig()
+	return runtimeCfg.ValidateRequiredSchedulerConfig()
 }

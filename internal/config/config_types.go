@@ -36,6 +36,8 @@ type PluginsConfig struct {
 	StoreAuth []sdkpluginstore.AuthConfig `yaml:"store-auth,omitempty" json:"store-auth,omitempty"`
 	// AuthRevision changes when Home-managed plugin credentials change.
 	AuthRevision int64 `yaml:"auth-revision,omitempty" json:"auth-revision,omitempty"`
+	// RequiredScheduler names a plugin whose scheduler capability must remain available.
+	RequiredScheduler string `yaml:"required-scheduler,omitempty" json:"required-scheduler,omitempty"`
 	// Configs stores per-plugin instance configuration by plugin ID.
 	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
 }

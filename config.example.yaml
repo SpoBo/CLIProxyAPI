@@ -1124,6 +1124,12 @@ observability:
 plugins:
   enabled: false
   dir: "plugins"
+  # Optional fail-closed scheduler plugin ID. When set, this plugin must be
+  # configured below with enabled: true and must load a Scheduler capability.
+  # Startup/config application fails if it cannot register. Runtime scheduler
+  # absence, panic, error, or invalid selection rejects the request instead of
+  # falling back to native credential scheduling.
+  # required-scheduler: "scheduler"
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
   #   - "https://example.com/cliproxy-plugins/registry.json"

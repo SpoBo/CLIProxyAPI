@@ -20,6 +20,7 @@ type capabilityRecord struct {
 type Snapshot struct {
 	enabled                   bool
 	records                   []capabilityRecord
+	requiredScheduler         string
 	quotaSupportedProvidersMu sync.RWMutex
 	quotaSupportedProviders   map[string][]string
 }

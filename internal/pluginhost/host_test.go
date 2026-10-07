@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -119,6 +120,40 @@ func TestHostApplyConfig_ExpandsPluginsDirLeadingTilde(t *testing.T) {
 	}
 	if !h.PluginRegistered("alpha") {
 		t.Fatal("PluginRegistered(alpha) = false, want true")
+	}
+}
+
+func TestHostApplyConfig_RequiredSchedulerMustLoadAndRegisterCapability(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		install         bool
+		panicOnRegister bool
+	}{
+		{name: "load failure"},
+		{name: "registration failure", install: true, panicOnRegister: true},
+		{name: "scheduler capability missing", install: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			loader := newTestSymbolLoader()
+			if test.install {
+				plugin := &testPlugin{registerResult: validTestPlugin("quota-policy"), panicOnRegister: test.panicOnRegister}
+				loader.lookups["quota-policy"] = newTestSymbolLookup(plugin)
+			}
+			h := NewForTest(loader)
+			t.Cleanup(h.ShutdownAll)
+
+			errApply := h.ApplyConfig(context.Background(), &config.Config{
+				Plugins: config.PluginsConfig{
+					Enabled:           true,
+					Dir:               makePluginDir(t, "quota-policy"),
+					RequiredScheduler: "quota-policy",
+					Configs:           enabledPluginConfigs("quota-policy"),
+				},
+			})
+			if errApply == nil || !strings.Contains(errApply.Error(), "required scheduler") {
+				t.Fatalf("ApplyConfig() error = %v, want required scheduler failure", errApply)
+			}
+		})
 	}
 }
 

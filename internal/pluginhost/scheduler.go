@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -9,29 +10,45 @@ import (
 )
 
 func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	required := h.requiredScheduler()
 	record := h.schedulerRecord()
 	if record == nil {
+		if required != "" {
+			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("required scheduler %q is unavailable", required)
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
 	resp, handled, errPick := h.callScheduler(ctx, *record, req)
-	if errPick != nil || !handled {
+	if errPick != nil {
 		return resp, handled, errPick
 	}
+	if !handled {
+		if required != "" {
+			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("required scheduler %q failed during selection", required)
+		}
+		return resp, false, nil
+	}
 	if !resp.Handled {
+		if required != "" {
+			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("required scheduler %q returned no decision", required)
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
 	resp, valid, reason := normalizeSchedulerResponse(resp, req)
 	if !valid {
 		log.WithField("plugin_id", record.id).Warnf("pluginhost: scheduler returned invalid response: %s", reason)
+		if required != "" {
+			return pluginapi.SchedulerPickResponse{}, true, fmt.Errorf("required scheduler %q returned invalid response: %s", required, reason)
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 	return resp, true, nil
 }
 
 func (h *Host) HasScheduler() bool {
-	return h.schedulerRecord() != nil
+	return h.requiredScheduler() != "" || h.schedulerRecord() != nil
 }
 
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
@@ -46,7 +63,12 @@ func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil
 	}
-	for _, record := range h.activeRecords() {
+	snap := h.Snapshot()
+	required := strings.TrimSpace(snap.requiredScheduler)
+	for _, record := range h.activeRecordsFromSnapshot(snap) {
+		if required != "" && record.id != required {
+			continue
+		}
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
 			continue
 		}
@@ -54,6 +76,13 @@ func (h *Host) schedulerRecord() *capabilityRecord {
 		return &copyRecord
 	}
 	return nil
+}
+
+func (h *Host) requiredScheduler() string {
+	if h == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.Snapshot().requiredScheduler)
 }
 
 func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req pluginapi.SchedulerPickRequest) (resp pluginapi.SchedulerPickResponse, handled bool, err error) {

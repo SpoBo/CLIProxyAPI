@@ -105,7 +105,14 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	}
 
 	if s.pluginHost != nil {
-		s.pluginHost.ApplyConfig(ctx, cfg)
+		errApply := s.pluginHost.ApplyConfig(ctx, cfg)
+		if s.coreManager != nil {
+			s.coreManager.SetPluginScheduler(s.pluginHost)
+		}
+		if errApply != nil {
+			log.WithError(errApply).Error("failed to apply plugin runtime config")
+			return false
+		}
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false

@@ -16,6 +16,9 @@ Add the plugin under `plugins.configs`:
 
 ```yaml
 plugins:
+  enabled: true
+  # Optional: make this scheduler mandatory and fail closed.
+  # required-scheduler: scheduler
   configs:
     scheduler:
       enabled: true
@@ -38,6 +41,20 @@ Behavior:
 - When `delegate` is any other non-empty value, the plugin leaves the pick unhandled.
 - When `delegate` is empty and `auth_id` exists in the candidates, the plugin returns that auth ID and marks the pick as handled.
 - When no rule matches, the plugin leaves the pick unhandled.
+
+## Scheduler candidate quota observations
+
+Each `SchedulerAuthCandidate` includes `Quota` and, when the requested model has
+its own observation, `ModelQuota`. Both expose only `ObservedAt` plus the bounded
+provider quota `Signals` accepted by the host's quota observer. Signal maps and
+safe routing attributes are cloned for the call. Credential tokens, email
+addresses, auth filenames, raw auth metadata, and provider storage are not
+included. Plugins must treat all candidate fields as read-only.
+
+When `plugins.required-scheduler` names this plugin, it must return a valid
+decision for every pick: a known candidate `AuthID`, a supported built-in
+delegate, or an explicit rejection. Missing/unhandled/invalid responses, plugin
+errors, and panics reject the request; native scheduler fallback is disabled.
 
 ## Build
 

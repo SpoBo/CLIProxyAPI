@@ -202,22 +202,28 @@ func (h *Host) PluginBusy(id string) bool {
 	return ok
 }
 
-func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
+func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	if h == nil || !h.lockApply(ctx) {
-		return
+		return context.Canceled
 	}
 	defer h.unlockApply()
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if errContext := ctx.Err(); errContext != nil {
-		return
+		return errContext
+	}
+	if cfg != nil {
+		cfg.NormalizePluginsConfig()
+		if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+			return errValidate
+		}
 	}
 
 	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
 	if errRuntimeConfig != nil {
 		log.WithError(errRuntimeConfig).Error("failed to apply plugin runtime config")
-		return
+		return errRuntimeConfig
 	}
 	h.mu.Lock()
 	h.runtimeConfig = cfg
@@ -231,7 +237,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		h.snapshot.Store(emptySnapshot())
 		h.mu.Unlock()
 		h.refreshThinkingProviders(nil)
-		return
+		return nil
 	}
 
 	desiredVersions := desiredPluginVersions(rc.Items)
@@ -245,7 +251,10 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		h.snapshot.Store(emptySnapshot())
 		h.mu.Unlock()
 		h.refreshThinkingProviders(nil)
-		return
+		if required := strings.TrimSpace(cfg.Plugins.RequiredScheduler); required != "" {
+			return fmt.Errorf("required scheduler %q could not be discovered: %w", required, errSelect)
+		}
+		return nil
 	}
 	files = h.withLoadedPluginFallbacks(files, rc.Items, desiredVersions)
 
@@ -292,7 +301,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 				if errContext := ctx.Err(); errContext != nil {
 					h.clearLoadingRequest(file.ID, request)
 					_, _, _ = h.rollbackReplacement(replaced, item)
-					return
+					return errContext
 				}
 			}
 			h.startPluginLoad(ctx, file, item, request)
@@ -305,7 +314,10 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 					h.cleanupCanceledPluginLoadAndWait(file.ID, request)
 					_, _, _ = h.rollbackReplacement(replaced, item)
 				}
-				return
+				if errContext := ctx.Err(); errContext != nil {
+					return errContext
+				}
+				return context.Canceled
 			}
 			if loadResult.err != nil || (replaced != nil && !loadResult.initialized) {
 				if replaced == nil {
@@ -330,7 +342,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 				if replaced != nil {
 					_, _, _ = h.rollbackReplacement(replaced, item)
 				}
-				return
+				return context.Canceled
 			}
 			if errContext := ctx.Err(); errContext != nil {
 				h.mu.Unlock()
@@ -340,7 +352,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 					h.cleanupPluginLoadAndWait(file.ID, request, loadResult.loaded)
 					_, _, _ = h.rollbackReplacement(replaced, item)
 				}
-				return
+				return errContext
 			}
 			delete(h.loading, file.ID)
 			lp = loadResult.loaded
@@ -401,7 +413,12 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		h.cleanupFilesPending = false
 	}
 	h.rebuildActivePluginMapsLocked(records)
-	h.snapshot.Store(&Snapshot{enabled: true, records: records, quotaSupportedProviders: make(map[string][]string)})
+	h.snapshot.Store(&Snapshot{
+		enabled:                 true,
+		records:                 records,
+		requiredScheduler:       strings.TrimSpace(cfg.Plugins.RequiredScheduler),
+		quotaSupportedProviders: make(map[string][]string),
+	})
 	h.mu.Unlock()
 	h.refreshThinkingProviders(records)
 	for _, fields := range hotReloadLogs {
@@ -412,6 +429,16 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
 		}
 	}
+	required := strings.TrimSpace(cfg.Plugins.RequiredScheduler)
+	if required != "" {
+		for _, record := range records {
+			if record.id == required && record.plugin.Capabilities.Scheduler != nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("required scheduler %q did not load and register a scheduler capability", required)
+	}
+	return nil
 }
 
 func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
@@ -682,8 +709,14 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 		delete(h.pluginFileVersions, cleanPluginPath(target.path))
 	}
 	records, enabled := h.snapshotWithoutPluginLocked(id)
+	requiredScheduler := h.Snapshot().requiredScheduler
 	h.removePluginRuntimeStateLocked(id)
-	h.snapshot.Store(&Snapshot{enabled: enabled, records: records})
+	h.snapshot.Store(&Snapshot{
+		enabled:                 enabled,
+		records:                 records,
+		requiredScheduler:       requiredScheduler,
+		quotaSupportedProviders: make(map[string][]string),
+	})
 	h.mu.Unlock()
 
 	h.closeHostHTTPCallbackInstances(id, instances)
@@ -1019,17 +1052,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 		return capabilityRecord{}, pluginFile{}, false
 	}
 	return capabilityRecord{
-			id:       lp.id,
-			path:     lp.path,
-			version:  lp.version,
-			priority: item.Priority,
-			meta:     plugin.Metadata,
-			plugin:   plugin,
-		}, pluginFile{
-			ID:      lp.id,
-			Path:    lp.path,
-			Version: lp.version,
-		}, true
+		id:       lp.id,
+		path:     lp.path,
+		version:  lp.version,
+		priority: item.Priority,
+		meta:     plugin.Metadata,
+		plugin:   plugin,
+	}, pluginFile{
+		ID:      lp.id,
+		Path:    lp.path,
+		Version: lp.version,
+	}, true
 }
 
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {

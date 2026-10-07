@@ -518,10 +518,26 @@ type SchedulerAuthCandidate struct {
 	Priority int
 	// Status is the current host-visible auth status.
 	Status string
-	// Attributes contains immutable routing and provider attributes.
+	// Attributes contains a cloned subset of non-sensitive routing attributes.
 	Attributes map[string]string
-	// Metadata contains mutable host-managed auth metadata.
+	// Metadata is reserved for explicitly plugin-safe host context. The native host
+	// does not populate it from auth metadata.
 	Metadata map[string]any
+	// Quota is a read-only snapshot of bounded, non-secret quota signals observed
+	// for the credential. The host clones the signal map before invoking plugins.
+	Quota SchedulerQuotaObservation
+	// ModelQuota is the requested model's quota observation when one is available.
+	// The host clones the signal map before invoking plugins.
+	ModelQuota *SchedulerQuotaObservation
+}
+
+// SchedulerQuotaObservation is a bounded, non-secret quota watermark collected by the host.
+// Signals contains only provider-specific values accepted by the host quota observer.
+type SchedulerQuotaObservation struct {
+	// ObservedAt is when Signals was collected from an upstream response.
+	ObservedAt time.Time
+	// Signals contains bounded quota watermark values. Treat this map as read-only.
+	Signals map[string]string
 }
 
 // SchedulerPickResponse returns a scheduler plugin routing decision.

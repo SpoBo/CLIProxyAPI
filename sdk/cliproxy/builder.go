@@ -207,6 +207,9 @@ func (b *Builder) Build() (*Service, error) {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
 	b.cfg.NormalizePluginsConfig()
+	if errValidate := b.cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+		return nil, fmt.Errorf("cliproxy: validate plugin configuration: %w", errValidate)
+	}
 	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
 	}
@@ -242,7 +245,9 @@ func (b *Builder) Build() (*Service, error) {
 		pluginHost = pluginhost.New()
 	}
 	if b.cfg != nil {
-		pluginHost.ApplyConfig(context.Background(), b.cfg)
+		if errApply := pluginHost.ApplyConfig(context.Background(), b.cfg); errApply != nil {
+			return nil, fmt.Errorf("cliproxy: apply plugin configuration: %w", errApply)
+		}
 		pluginHost.RegisterFrontendAuthProviders()
 	}
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
