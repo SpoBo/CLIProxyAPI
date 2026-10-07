@@ -784,42 +784,20 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 	return latestAuthErr
 }
 
-func schedulerAttributeSensitive(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	normalized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
-	compact := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(key)
-	for _, fragment := range []string{
-		"api_key",
-		"apikey",
-		"token",
-		"secret",
-		"cookie",
-		"credential",
-		"password",
-		"storage",
-		"authorization",
-		"auth_header",
-		"proxy_url",
-		"email",
-		"filename",
-		"file_name",
-		"path",
-		"source",
-	} {
-		if strings.Contains(key, fragment) || strings.Contains(normalized, fragment) || strings.Contains(compact, fragment) {
-			return true
-		}
-	}
-	return false
+var schedulerSafeAttributeKeys = map[string]struct{}{
+	"priority":      {},
+	AttributeWeight: {},
+	"region":        {},
+	"team":          {},
 }
 
 func schedulerSafeAttributes(src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(src))
+	out := make(map[string]string, len(schedulerSafeAttributeKeys))
 	for key, value := range src {
-		if schedulerAttributeSensitive(key) {
+		if _, ok := schedulerSafeAttributeKeys[key]; !ok {
 			continue
 		}
 		out[key] = value

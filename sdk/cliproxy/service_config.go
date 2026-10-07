@@ -177,7 +177,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 	}
 
 	registrationCtx := coreauth.WithSkipPersist(ctx)
-	s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg)
+	if !s.syncPluginRuntimeConfigForConfig(registrationCtx, cfg) && strings.TrimSpace(cfg.Plugins.RequiredScheduler) != "" {
+		return false
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
