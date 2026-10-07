@@ -44,11 +44,13 @@ Behavior:
 
 ## Scheduler candidate quota observations
 
-Each `SchedulerAuthCandidate` includes `Quota` and, when the requested model has
-its own observation, `ModelQuota`. Both expose only `ObservedAt` plus the bounded
-provider quota `Signals` accepted by the host's quota observer. Signal maps and
-safe routing attributes are cloned for the call. Credential tokens, email
-addresses, auth filenames, raw auth metadata, and provider storage are not
+Each `SchedulerAuthCandidate` exposes only typed routing fields (`ID`,
+`Provider`, `Priority`, `Weight`, and `Status`) plus `Quota` and, when the
+requested model has its own observation, `ModelQuota`. `Attributes` and
+`Metadata` are currently empty. Quota observations contain only `ObservedAt`
+and bounded provider quota `Signals` accepted by the host's quota observer;
+the signal maps are cloned for each call. Credential tokens, email addresses,
+auth filenames, raw auth attributes and metadata, and provider storage are not
 included. Plugins must treat all candidate fields as read-only.
 
 When `plugins.required-scheduler` names this plugin, it must return a valid

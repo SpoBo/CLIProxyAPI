@@ -193,7 +193,8 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return h.inner.PickAuth(ctx, req)
 }
 
-// HasScheduler reports whether any active plugin provides a scheduler.
+// HasScheduler reports whether an active plugin provides a scheduler or a configured
+// required scheduler is unavailable and therefore keeps selection fail-closed.
 func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
