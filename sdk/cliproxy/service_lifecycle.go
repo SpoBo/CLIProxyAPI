@@ -354,13 +354,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			if s.watcher != nil {
 				s.watcher.SetPluginAuthParser(nil)
 			}
-			s.pluginHost.ApplyConfig(ctx, &config.Config{})
-			s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
-			s.registerAvailableExecutors(ctx, executorRegistrationOptions{
-				includePlugins: true,
-			})
-			s.pluginHost.RegisterFrontendAuthProviders()
-			s.pluginHost.ShutdownAllContext(ctx)
+			if s.coreManager != nil {
+				s.coreManager.SetPluginScheduler(nil)
+			}
+			if errTeardown := s.pluginHost.TeardownContext(ctx); errTeardown != nil {
+				log.Errorf("failed to tear down plugin host: %v", errTeardown)
+				if shutdownErr == nil {
+					shutdownErr = errTeardown
+				}
+			}
+			if s.server != nil {
+				s.server.RefreshPluginManagementRoutes()
+			}
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
 			}

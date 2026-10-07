@@ -49,9 +49,12 @@ Each `SchedulerAuthCandidate` exposes only typed routing fields (`ID`,
 requested model has its own observation, `ModelQuota`. `Attributes` and
 `Metadata` are currently empty. Quota observations contain only `ObservedAt`
 and bounded provider quota `Signals` accepted by the host's quota observer;
-the signal maps are cloned for each call. Credential tokens, email addresses,
-auth filenames, raw auth attributes and metadata, and provider storage are not
-included. Plugins must treat all candidate fields as read-only.
+the signal maps are cloned for each call. `SchedulerAuthCandidate.ID` is the
+stable auth identifier and may contain an auth filename or account identifier,
+including an email address. Native `.so` plugins execute in-process and are
+fully trusted with that identifier. Raw auth attributes and metadata, provider
+storage, tokens, and proxy credentials are not included. Plugins must treat all
+candidate fields as read-only.
 
 When `plugins.required-scheduler` names this plugin, it must return a valid
 decision for every pick: a known candidate `AuthID`, a supported built-in

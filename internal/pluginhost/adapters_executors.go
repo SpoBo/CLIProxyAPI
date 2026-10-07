@@ -155,6 +155,10 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 		}
 	}
 	h.executorProviders = nextProviders
+	h.executorManager = manager
+	if modelRegistry != nil {
+		h.modelRegistry = modelRegistry
+	}
 	if nextModelClients == nil {
 		nextModelClients = make(map[string]struct{})
 	}

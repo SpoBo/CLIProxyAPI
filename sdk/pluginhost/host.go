@@ -8,6 +8,7 @@ import (
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,17 +65,29 @@ type Host struct {
 	inner *internalpluginhost.Host
 }
 
+// ErrInvalidHost reports an operation attempted on a nil or uninitialized host.
+var ErrInvalidHost = internalpluginhost.ErrInvalidHost
+
 // New creates a plugin host.
 func New() *Host {
 	return &Host{inner: internalpluginhost.New()}
 }
 
-// ApplyConfig applies plugin runtime configuration and validates any required scheduler.
+// ApplyConfig applies plugin runtime configuration. It preserves the original no-result
+// SDK signature; callers that need startup validation must use ApplyConfigWithError.
 // Once a required scheduler is active, equivalent plugin configuration is a no-op;
-// changing that protected runtime returns sdk/config.ErrRestartRequired and requires a restart.
-func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) error {
+// changing that protected runtime requires a restart.
+func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) {
+	if errApply := h.ApplyConfigWithError(ctx, cfg); errApply != nil {
+		log.WithError(errApply).Error("pluginhost: failed to apply runtime configuration")
+	}
+}
+
+// ApplyConfigWithError applies plugin runtime configuration and reports validation,
+// discovery, required-scheduler, and context failures to checked callers.
+func (h *Host) ApplyConfigWithError(ctx context.Context, cfg RuntimeConfig) error {
 	if h == nil || h.inner == nil {
-		return context.Canceled
+		return ErrInvalidHost
 	}
 	internalCfg := runtimeConfigToInternalConfig(cfg)
 	return h.inner.ApplyConfig(ctx, internalCfg)
@@ -82,15 +95,21 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) error {
 
 // ShutdownAll unloads every active plugin.
 func (h *Host) ShutdownAll() {
-	h.ShutdownAllContext(context.Background())
+	_ = h.TeardownContext(context.Background())
 }
 
 // ShutdownAllContext detaches every active plugin and bounds waiting for active calls by ctx.
 func (h *Host) ShutdownAllContext(ctx context.Context) {
+	_ = h.TeardownContext(ctx)
+}
+
+// TeardownContext detaches all capabilities and registrations, unloads clients,
+// and resets the host so a fresh required runtime can be started.
+func (h *Host) TeardownContext(ctx context.Context) error {
 	if h == nil || h.inner == nil {
-		return
+		return ErrInvalidHost
 	}
-	h.inner.ShutdownAllContext(ctx)
+	return h.inner.TeardownContext(ctx)
 }
 
 // PluginBusy reports whether a plugin dynamic library is loaded or being loaded.

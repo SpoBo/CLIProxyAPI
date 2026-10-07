@@ -85,3 +85,33 @@ func TestRecordOmittedGenerateIsEnabled(t *testing.T) {
 		t.Fatalf("GenerateEnabled(omitted) = false, want true")
 	}
 }
+
+func TestManagerUnregisterNamedRemovesOnlyTargetAndRepairsIndexes(t *testing.T) {
+	manager := NewManager(1)
+	unnamed := &usagePluginStub{}
+	first := &usagePluginStub{}
+	second := &usagePluginStub{}
+	manager.Register(unnamed)
+	manager.RegisterNamed("first", first)
+	manager.RegisterNamed("second", second)
+
+	manager.UnregisterNamed("first")
+	if len(manager.plugins) != 2 || manager.plugins[0] != unnamed || manager.plugins[1] != second {
+		t.Fatalf("plugins after first removal = %#v, want unnamed and second", manager.plugins)
+	}
+	if _, exists := manager.named["first"]; exists {
+		t.Fatal("removed named plugin retained its index")
+	}
+	if index := manager.named["second"]; index != 1 {
+		t.Fatalf("second named plugin index = %d, want 1", index)
+	}
+
+	manager.UnregisterNamed("second")
+	if len(manager.plugins) != 1 || manager.plugins[0] != unnamed || len(manager.named) != 0 {
+		t.Fatalf("plugins after second removal = %#v, named = %#v", manager.plugins, manager.named)
+	}
+}
+
+type usagePluginStub struct{}
+
+func (*usagePluginStub) HandleUsage(context.Context, Record) {}

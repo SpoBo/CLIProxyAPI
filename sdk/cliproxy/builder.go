@@ -54,6 +54,10 @@ type Builder struct {
 	// pluginHost owns dynamic plugin lifecycle and adapters.
 	pluginHost *pluginhost.Host
 
+	// pluginHostFactory creates an internally owned host. It is injectable by
+	// package tests without changing process-global state.
+	pluginHostFactory func() *pluginhost.Host
+
 	// postAuthHook is called after auth record creation and before persistence.
 	postAuthHook coreauth.PostAuthHook
 
@@ -203,14 +207,15 @@ func (b *Builder) Build() (*Service, error) {
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
 	}
-	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
+	cfg := b.cfg.CloneForRuntime()
+	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
-	b.cfg.NormalizePluginsConfig()
-	if errValidate := b.cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+	cfg.NormalizePluginsConfig()
+	if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate plugin configuration: %w", errValidate)
 	}
-	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
+	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
 	}
 
@@ -239,17 +244,24 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager = sdkaccess.NewManager()
 	}
 
-	configaccess.Register(&b.cfg.SDKConfig)
 	pluginHost := b.pluginHost
+	pluginHostOwned := false
 	if pluginHost == nil {
-		pluginHost = pluginhost.New()
-	}
-	if b.cfg != nil {
-		if errApply := pluginHost.ApplyConfig(context.Background(), b.cfg); errApply != nil {
-			return nil, fmt.Errorf("cliproxy: apply plugin configuration: %w", errApply)
+		pluginHostFactory := b.pluginHostFactory
+		if pluginHostFactory == nil {
+			pluginHostFactory = pluginhost.New
 		}
-		pluginHost.RegisterFrontendAuthProviders()
+		pluginHost = pluginHostFactory()
+		pluginHostOwned = true
 	}
+	if errApply := pluginHost.ApplyConfig(context.Background(), cfg); errApply != nil {
+		if pluginHostOwned {
+			_ = pluginHost.TeardownContext(context.Background())
+		}
+		return nil, fmt.Errorf("cliproxy: apply plugin configuration: %w", errApply)
+	}
+	pluginHost.RegisterFrontendAuthProviders()
+	configaccess.Register(&cfg.SDKConfig)
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
 	coreManager := b.coreManager
@@ -257,8 +269,8 @@ func (b *Builder) Build() (*Service, error) {
 	var appliedRoutingState *routingRuntimeState
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
-		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
-			dirSetter.SetBaseDir(b.cfg.AuthDir)
+		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
 		}
 		if cooldownStateStore == nil {
 			if provider, ok := tokenStore.(coreauth.CooldownStateStoreProvider); ok {
@@ -266,14 +278,14 @@ func (b *Builder) Build() (*Service, error) {
 			}
 		}
 
-		routingState := normalizedRoutingRuntimeState(b.cfg)
+		routingState := normalizedRoutingRuntimeState(cfg)
 		coreManager = coreauth.NewManager(tokenStore, newRoutingSelector(routingState), nil)
 		appliedRoutingState = &routingState
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
-	coreManager.SetConfig(b.cfg)
-	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	coreManager.SetConfig(cfg)
+	coreManager.SetOAuthModelAlias(cfg.OAuthModelAlias)
 	if pluginHost != nil {
 		coreManager.SetPluginScheduler(pluginHost)
 	}
@@ -282,7 +294,7 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg,
+		cfg:                 cfg,
 		configPath:          b.configPath,
 		tokenProvider:       tokenProvider,
 		apiKeyProvider:      apiKeyProvider,

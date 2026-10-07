@@ -111,6 +111,9 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	if newCfg == nil {
 		return configCommit{}
 	}
+	// Reload producers retain ownership of their config. Publish only a private
+	// snapshot so watcher/Home reuse cannot race request-side readers.
+	newCfg = newCfg.CloneForRuntime()
 	if s.pluginHost != nil {
 		if errPreflight := s.pluginHost.PreflightConfig(newCfg); errPreflight != nil {
 			log.WithError(errPreflight).Warn("rejected config update that requires service restart")

@@ -96,7 +96,8 @@ func TestHostApplyConfigActiveRequiredSchedulerEqualBoundaryRefreshesOnlyRuntime
 	currentLoaded := h.loaded["quota-policy"]
 	loadedUnchanged := currentLoaded == activeLoaded
 	clientUnchanged := currentLoaded != nil && currentLoaded.client == activeClient
-	runtimeRefreshed := h.runtimeConfig == equivalentCfg
+	runtimeRefreshed := h.runtimeConfig != nil && h.runtimeConfig != equivalentCfg &&
+		h.runtimeConfig.ProxyURL == equivalentCfg.ProxyURL && h.runtimeConfig.AuthDir == equivalentCfg.AuthDir
 	routesUnchanged := len(h.managementRoutes) == 1 && len(h.resourceRoutes) == 1 &&
 		h.managementRoutes["GET /runtime-route"].pluginID == "quota-policy" &&
 		h.resourceRoutes["GET /runtime-resource"].pluginID == "quota-policy"

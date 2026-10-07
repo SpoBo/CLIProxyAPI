@@ -411,6 +411,7 @@ func (h *Host) commitModelClients(snap *Snapshot, modelRegistry modelRegistry, r
 	h.modelClientIDs = nextClients
 	h.modelProviders = nextProviders
 	h.modelRegistrations = nextModelRegistrations
+	h.modelRegistry = modelRegistry
 	h.mu.Unlock()
 
 	for _, registration := range registrations {

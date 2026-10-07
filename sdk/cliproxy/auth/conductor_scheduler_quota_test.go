@@ -17,8 +17,9 @@ func (schedulerStorageSentinel) SaveTokenToFile(string) error { return nil }
 func TestSchedulerAuthCandidatesExposeOnlySafeQuotaObservations(t *testing.T) {
 	authObservedAt := time.Unix(1_800_000_000, 0).UTC()
 	modelObservedAt := authObservedAt.Add(time.Minute)
+	const stableAuthID = "codex-owner@example.com.json"
 	auth := &Auth{
-		ID:       "auth-1",
+		ID:       stableAuthID,
 		Provider: " Codex ",
 		FileName: "/credentials/account.json",
 		ProxyURL: "http://user:password@proxy.invalid",
@@ -58,6 +59,9 @@ func TestSchedulerAuthCandidatesExposeOnlySafeQuotaObservations(t *testing.T) {
 		t.Fatalf("schedulerAuthCandidates() len = %d, want 1", len(candidates))
 	}
 	candidate := candidates[0]
+	if candidate.ID != stableAuthID {
+		t.Fatalf("candidate.ID = %q, want stable auth identifier %q", candidate.ID, stableAuthID)
+	}
 	if candidate.Provider != "codex" {
 		t.Fatalf("candidate.Provider = %q, want codex", candidate.Provider)
 	}

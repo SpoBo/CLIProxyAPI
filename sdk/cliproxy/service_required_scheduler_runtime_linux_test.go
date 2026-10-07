@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -338,8 +339,11 @@ func TestServiceUnrelatedHotReloadPreservesActiveRequiredScheduler(t *testing.T)
 	service.cfgMu.RLock()
 	gotCfg := service.cfg
 	service.cfgMu.RUnlock()
-	if gotCfg != unrelated {
-		t.Fatal("unrelated hot reload did not publish s.cfg")
+	if gotCfg == unrelated {
+		t.Fatal("unrelated hot reload retained caller-owned config pointer")
+	}
+	if !reflect.DeepEqual(gotCfg, unrelated) {
+		t.Fatal("unrelated hot reload did not publish an equivalent private config snapshot")
 	}
 	if _, ok := manager.Selector().(*coreauth.FillFirstSelector); !ok {
 		t.Fatalf("unrelated hot reload selector = %T, want *FillFirstSelector", manager.Selector())

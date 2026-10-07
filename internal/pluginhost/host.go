@@ -13,8 +13,11 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -76,6 +79,8 @@ type Host struct {
 	requiredBoundary       *requiredSchedulerBoundary
 	authManager            *coreauth.Manager
 	modelExecutor          modelExecutor
+	modelRegistry          modelRegistry
+	executorManager        executorManager
 	modelClientIDs         map[string]struct{}
 	executorModelClientIDs map[string]struct{}
 	modelProviders         map[string]string
@@ -83,6 +88,8 @@ type Host struct {
 	providerModels         map[string][]*registryModelInfo
 	executorProviders      map[string]struct{}
 	accessProviderKeys     map[string]struct{}
+	usagePluginNames       map[string]struct{}
+	thinkingProviderOwners map[string]struct{}
 	commandLineFlags       map[string]commandLineFlagRecord
 	commandLineHits        map[string]struct{}
 	managementRoutes       map[string]managementRouteRecord
@@ -114,6 +121,8 @@ func New() *Host {
 		providerModels:         make(map[string][]*registryModelInfo),
 		executorProviders:      make(map[string]struct{}),
 		accessProviderKeys:     make(map[string]struct{}),
+		usagePluginNames:       make(map[string]struct{}),
+		thinkingProviderOwners: make(map[string]struct{}),
 		commandLineFlags:       make(map[string]commandLineFlagRecord),
 		commandLineHits:        make(map[string]struct{}),
 		managementRoutes:       make(map[string]managementRouteRecord),
@@ -204,7 +213,13 @@ func (h *Host) PluginBusy(id string) bool {
 }
 
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
-	if h == nil || !h.lockApply(ctx) {
+	if h == nil {
+		return ErrInvalidHost
+	}
+	if !h.lockApply(ctx) {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return context.Canceled
 	}
 	defer h.unlockApply()
@@ -214,6 +229,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 	if errContext := ctx.Err(); errContext != nil {
 		return errContext
 	}
+	// The caller retains ownership of cfg. Normalize, validate, and publish only
+	// a private snapshot so later caller mutations cannot race plugin callbacks.
+	cfg = cfg.CloneForRuntime()
 	preserveRequired, errPreflight := h.preflightConfig(cfg)
 	if errPreflight != nil {
 		return errPreflight
@@ -441,7 +459,6 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 		quotaSupportedProviders: make(map[string][]string),
 	})
 	h.mu.Unlock()
-	h.refreshThinkingProviders(records)
 	for _, fields := range hotReloadLogs {
 		log.WithFields(fields).Info("pluginhost: plugin hot reloaded")
 	}
@@ -461,11 +478,13 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) error {
 				h.mu.Lock()
 				h.requiredBoundary = boundary
 				h.mu.Unlock()
+				h.refreshThinkingProviders(records)
 				return nil
 			}
 		}
 		return fmt.Errorf("required scheduler %q did not load and register a scheduler capability", required)
 	}
+	h.refreshThinkingProviders(records)
 	return nil
 }
 
@@ -771,22 +790,45 @@ func (h *Host) UnloadPluginContext(ctx context.Context, id string) bool {
 	return true
 }
 
+// ErrInvalidHost reports an operation attempted on a nil or uninitialized host.
+var ErrInvalidHost = errors.New("pluginhost: invalid host")
+
 // ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
 func (h *Host) ShutdownAll() {
-	h.ShutdownAllContext(context.Background())
+	_ = h.TeardownContext(context.Background())
 }
 
 // ShutdownAllContext detaches all plugin runtime state without waiting beyond ctx
 // for active plugin calls to complete.
 func (h *Host) ShutdownAllContext(ctx context.Context) {
-	if h == nil || !h.lockApply(ctx) {
-		return
+	_ = h.TeardownContext(ctx)
+}
+
+// TeardownContext intentionally crosses the required-scheduler restart boundary.
+// It first atomically detaches every plugin capability, then reconciles registrations
+// owned by this host and unloads all plugin clients.
+func (h *Host) TeardownContext(ctx context.Context) error {
+	if h == nil {
+		return ErrInvalidHost
+	}
+	if !h.lockApply(ctx) {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return context.Canceled
 	}
 	defer h.unlockApply()
 
 	targets := make([]pluginUnloadTarget, 0)
 	var loading map[string]*pluginLoadRequest
 	loadingInstances := make(map[string][]*hostCallbackInstance)
+	var registeredModels modelRegistry
+	var registeredExecutors executorManager
+	modelClientIDs := make([]string, 0)
+	executorProviders := make([]string, 0)
+	accessProviderKeys := make([]string, 0)
+	usagePluginNames := make([]string, 0)
+	thinkingProviderOwners := make([]string, 0)
 	h.mu.Lock()
 	loading = make(map[string]*pluginLoadRequest, len(h.loading))
 	for id, request := range h.loading {
@@ -823,12 +865,37 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	}
 	h.loaded = make(map[string]*loadedPlugin)
 	h.retired = make(map[string][]*loadedPlugin)
+	registeredModels = h.modelRegistry
+	registeredExecutors = h.executorManager
+	for clientID := range h.modelClientIDs {
+		modelClientIDs = append(modelClientIDs, clientID)
+	}
+	for clientID := range h.executorModelClientIDs {
+		modelClientIDs = append(modelClientIDs, clientID)
+	}
+	for provider := range h.executorProviders {
+		executorProviders = append(executorProviders, provider)
+	}
+	for key := range h.accessProviderKeys {
+		accessProviderKeys = append(accessProviderKeys, key)
+	}
+	for name := range h.usagePluginNames {
+		usagePluginNames = append(usagePluginNames, name)
+	}
+	for owner := range h.thinkingProviderOwners {
+		thinkingProviderOwners = append(thinkingProviderOwners, owner)
+	}
+	h.modelRegistry = nil
+	h.executorManager = nil
 	h.modelClientIDs = make(map[string]struct{})
 	h.executorModelClientIDs = make(map[string]struct{})
 	h.modelProviders = make(map[string]string)
 	h.modelRegistrations = make(map[string]pluginModelRegistration)
 	h.providerModels = make(map[string][]*registryModelInfo)
 	h.executorProviders = make(map[string]struct{})
+	h.accessProviderKeys = make(map[string]struct{})
+	h.usagePluginNames = make(map[string]struct{})
+	h.thinkingProviderOwners = make(map[string]struct{})
 	h.commandLineFlags = make(map[string]commandLineFlagRecord)
 	h.commandLineHits = make(map[string]struct{})
 	h.managementRoutes = make(map[string]managementRouteRecord)
@@ -836,9 +903,38 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	h.pluginFileVersions = make(map[string]string)
 	h.activePluginVersions = make(map[string]string)
 	h.activePluginPaths = make(map[string]string)
+	h.fused = make(map[string]string)
+	h.runtimeConfig = nil
 	h.requiredBoundary = nil
+	h.cleanupFilesPending = true
 	h.snapshot.Store(emptySnapshot())
 	h.mu.Unlock()
+
+	if registeredModels != nil {
+		for _, clientID := range modelClientIDs {
+			registeredModels.UnregisterClient(clientID)
+		}
+	}
+	if registeredExecutors != nil {
+		for _, provider := range executorProviders {
+			existing, okExecutor := registeredExecutors.Executor(provider)
+			if okExecutor && h.ownsExecutor(existing) {
+				registeredExecutors.UnregisterExecutor(provider)
+			}
+		}
+	}
+	for _, key := range accessProviderKeys {
+		sdkaccess.UnregisterProvider(key)
+	}
+	if len(accessProviderKeys) > 0 {
+		sdkaccess.ClearExclusiveProvider()
+	}
+	for _, name := range usagePluginNames {
+		coreusage.UnregisterNamedPlugin(name)
+	}
+	for _, owner := range thinkingProviderOwners {
+		thinking.UnregisterPluginProviders(owner)
+	}
 
 	for id, instances := range loadingInstances {
 		h.closeHostHTTPCallbackInstances(id, instances)
@@ -852,8 +948,6 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
 	}
-	h.refreshThinkingProviders(nil)
-	h.RegisterFrontendAuthProviders()
 	for id, request := range loading {
 		h.cleanupCanceledPluginLoad(id, request)
 	}
@@ -867,6 +961,7 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
 	}
+	return nil
 }
 
 func (h *Host) lockApply(ctx context.Context) bool {

@@ -21,24 +21,46 @@ func (h *Host) RegisterUsagePlugins() {
 		return
 	}
 
+	nextNames := make(map[string]struct{})
 	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.UsagePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		coreusage.RegisterNamedPlugin("plugin:"+record.id, &usageAdapter{
+		name := "plugin:" + record.id
+		coreusage.RegisterNamedPlugin(name, &usageAdapter{
 			host:     h,
 			pluginID: record.id,
 			plugin:   plugin,
 		})
+		nextNames[name] = struct{}{}
+	}
+	staleNames := make([]string, 0)
+	h.mu.Lock()
+	for name := range h.usagePluginNames {
+		if _, exists := nextNames[name]; !exists {
+			staleNames = append(staleNames, name)
+		}
+	}
+	h.usagePluginNames = nextNames
+	h.mu.Unlock()
+	for _, name := range staleNames {
+		coreusage.UnregisterNamedPlugin(name)
 	}
 }
 
 func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
-	thinking.ClearPluginProviders()
 	if h == nil {
 		return
 	}
+	type registration struct {
+		owner    string
+		provider string
+		priority int
+		applier  *thinkingAdapter
+	}
+	registrations := make([]registration, 0, len(records))
+	nextOwners := make(map[string]struct{})
 	for _, record := range records {
 		applier := record.plugin.Capabilities.ThinkingApplier
 		if applier == nil || h.isPluginFused(record.id) {
@@ -48,14 +70,33 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		if !okProvider {
 			continue
 		}
-		thinking.RegisterPluginProvider(record.id, provider, record.priority, &thinkingAdapter{
-			host:     h,
-			pluginID: record.id,
-			path:     record.path,
-			version:  record.version,
+		registrations = append(registrations, registration{
+			owner:    record.id,
 			provider: provider,
-			applier:  applier,
+			priority: record.priority,
+			applier: &thinkingAdapter{
+				host:     h,
+				pluginID: record.id,
+				path:     record.path,
+				version:  record.version,
+				provider: provider,
+				applier:  applier,
+			},
 		})
+		nextOwners[record.id] = struct{}{}
+	}
+	h.mu.Lock()
+	previousOwners := make([]string, 0, len(h.thinkingProviderOwners))
+	for owner := range h.thinkingProviderOwners {
+		previousOwners = append(previousOwners, owner)
+	}
+	h.thinkingProviderOwners = nextOwners
+	h.mu.Unlock()
+	for _, owner := range previousOwners {
+		thinking.UnregisterPluginProviders(owner)
+	}
+	for _, item := range registrations {
+		thinking.RegisterPluginProvider(item.owner, item.provider, item.priority, item.applier)
 	}
 }
 

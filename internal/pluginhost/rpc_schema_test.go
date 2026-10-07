@@ -358,6 +358,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 				ID:         "auth-1",
 				Provider:   "openai",
 				Priority:   10,
+				Weight:     7,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "us"},
 			},
@@ -365,6 +366,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 				ID:         "auth-2",
 				Provider:   "codex",
 				Priority:   20,
+				Weight:     11,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "eu"},
 			},
@@ -396,6 +398,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 		if gotCandidate.ID != wantCandidate.ID ||
 			gotCandidate.Provider != wantCandidate.Provider ||
 			gotCandidate.Priority != wantCandidate.Priority ||
+			gotCandidate.Weight != wantCandidate.Weight ||
 			gotCandidate.Status != wantCandidate.Status ||
 			!reflect.DeepEqual(gotCandidate.Attributes, wantCandidate.Attributes) {
 			t.Fatalf("scheduler candidate[%d] = %#v, want %#v", index, gotCandidate, wantCandidate)
@@ -421,6 +424,7 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 				ID:         "auth-1",
 				Provider:   "openai",
 				Priority:   10,
+				Weight:     13,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "us"},
 				Metadata: map[string]any{
@@ -469,6 +473,7 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 	if gotCandidate.ID != wantCandidate.ID ||
 		gotCandidate.Provider != wantCandidate.Provider ||
 		gotCandidate.Priority != wantCandidate.Priority ||
+		gotCandidate.Weight != wantCandidate.Weight ||
 		gotCandidate.Status != wantCandidate.Status ||
 		!reflect.DeepEqual(gotCandidate.Attributes, wantCandidate.Attributes) {
 		t.Fatalf("scheduler candidate = %#v, want %#v", gotCandidate, wantCandidate)

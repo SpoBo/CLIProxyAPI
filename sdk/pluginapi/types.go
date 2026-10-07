@@ -510,7 +510,9 @@ type SchedulerOptions struct {
 
 // SchedulerAuthCandidate describes one auth candidate available to a scheduler.
 type SchedulerAuthCandidate struct {
-	// ID identifies the auth record.
+	// ID is the stable host auth identifier used for credential binding. It may
+	// contain an auth filename or account identifier such as an email address.
+	// Native plugins execute in-process and are trusted with this identifier.
 	ID string
 	// Provider identifies the auth provider.
 	Provider string
