@@ -16,6 +16,9 @@ Add the plugin under `plugins.configs`:
 
 ```yaml
 plugins:
+  enabled: true
+  # Optional: make this scheduler mandatory and fail closed.
+  # required-scheduler: scheduler
   configs:
     scheduler:
       enabled: true
@@ -38,6 +41,44 @@ Behavior:
 - When `delegate` is any other non-empty value, the plugin leaves the pick unhandled.
 - When `delegate` is empty and `auth_id` exists in the candidates, the plugin returns that auth ID and marks the pick as handled.
 - When no rule matches, the plugin leaves the pick unhandled.
+
+## Scheduler candidate quota observations
+
+Each `SchedulerAuthCandidate` exposes only typed routing fields (`ID`,
+`Provider`, `Priority`, `Weight`, and `Status`) plus `Quota` and, when the
+requested model has its own observation, `ModelQuota`. `Attributes` and
+`Metadata` are currently empty. Quota observations contain only `ObservedAt`
+and bounded provider quota `Signals` accepted by the host's quota observer;
+the signal maps are cloned for each call. `SchedulerAuthCandidate.ID` is the
+stable auth identifier and may contain an auth filename or account identifier,
+including an email address. Native `.so` plugins execute in-process and are
+fully trusted with that identifier. Raw auth attributes and metadata, provider
+storage, tokens, and proxy credentials are not included. Plugins must treat all
+candidate fields as read-only.
+
+When `plugins.required-scheduler` names this plugin, it must return a valid
+decision for every pick: a known candidate `AuthID`, a supported built-in
+delegate, or an explicit rejection. Missing/unhandled/invalid responses, plugin
+errors, and panics reject the request; native scheduler fallback is disabled.
+
+### Required scheduler restart boundary
+
+After a required scheduler is active, CLIProxyAPI treats its static runtime as
+restart-only. Hot reload cannot enable, disable, rename, replace, or reconfigure
+the required scheduler, nor change the plugin directory/binary selection,
+enabled plugin set, store settings, plugin config, or tier topology. Those
+changes return a restart-required error before host or service runtime state is
+published. An equivalent plugin section is an exact no-op, so unrelated service
+configuration can still reload while the same plugin client and snapshot remain
+active.
+
+This boundary does not prevent plugin-owned live operational changes. A
+production scheduler can expose an authenticated `ManagementRoute` for controls
+such as reserve-mode switching, atomically persist those controls to a
+plugin-owned state file, and watch or periodically reload that file itself. The
+host does not implement or supervise plugin state-file watching; static binary,
+host configuration, required-scheduler selection, and tier topology remain
+restart-only.
 
 ## Build
 

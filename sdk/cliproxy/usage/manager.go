@@ -308,9 +308,17 @@ type Manager struct {
 	queue  []queueItem
 	closed bool
 
-	pluginsMu sync.RWMutex
-	plugins   []Plugin
-	named     map[string]int
+	pluginsMu      sync.RWMutex
+	plugins        []Plugin
+	named          map[string]int
+	namedOwners    map[string]uint64
+	nextNamedOwner uint64
+}
+
+// NamedPluginRegistration identifies one exact named plugin installation.
+type NamedPluginRegistration struct {
+	name  string
+	owner uint64
 }
 
 // NewManager constructs a manager with a buffered queue.
@@ -363,26 +371,100 @@ func (m *Manager) Register(plugin Plugin) {
 
 // RegisterNamed registers or replaces a plugin by name.
 func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+	m.RegisterNamedOwned(name, plugin)
+}
+
+// RegisterNamedOwned registers or replaces a named plugin and returns its installation identity.
+func (m *Manager) RegisterNamedOwned(name string, plugin Plugin) NamedPluginRegistration {
 	if m == nil || plugin == nil {
-		return
+		return NamedPluginRegistration{}
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return
+		return NamedPluginRegistration{}
 	}
 
 	m.pluginsMu.Lock()
 	if m.named == nil {
 		m.named = make(map[string]int)
 	}
+	if m.namedOwners == nil {
+		m.namedOwners = make(map[string]uint64)
+	}
+	m.nextNamedOwner++
+	registration := NamedPluginRegistration{name: name, owner: m.nextNamedOwner}
+	m.namedOwners[name] = registration.owner
 	if index, exists := m.named[name]; exists && index >= 0 && index < len(m.plugins) {
 		m.plugins[index] = plugin
 		m.pluginsMu.Unlock()
-		return
+		return registration
 	}
 	m.named[name] = len(m.plugins)
 	m.plugins = append(m.plugins, plugin)
 	m.pluginsMu.Unlock()
+	return registration
+}
+
+// UnregisterNamed removes a named plugin from the delivery list.
+func (m *Manager) UnregisterNamed(name string) {
+	if m == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	m.pluginsMu.Lock()
+	m.removeNamedLocked(name)
+	m.pluginsMu.Unlock()
+}
+
+// UnregisterNamedOwned removes a named plugin only when registration is still current.
+func (m *Manager) UnregisterNamedOwned(registration NamedPluginRegistration) bool {
+	if m == nil || registration.name == "" || registration.owner == 0 {
+		return false
+	}
+	m.pluginsMu.Lock()
+	if m.namedOwners[registration.name] != registration.owner {
+		m.pluginsMu.Unlock()
+		return false
+	}
+	removed := m.removeNamedLocked(registration.name)
+	m.pluginsMu.Unlock()
+	return removed
+}
+
+// NamedPlugin returns the currently installed plugin for name.
+func (m *Manager) NamedPlugin(name string) Plugin {
+	if m == nil {
+		return nil
+	}
+	name = strings.TrimSpace(name)
+	m.pluginsMu.RLock()
+	index, exists := m.named[name]
+	if !exists || index < 0 || index >= len(m.plugins) {
+		m.pluginsMu.RUnlock()
+		return nil
+	}
+	plugin := m.plugins[index]
+	m.pluginsMu.RUnlock()
+	return plugin
+}
+
+func (m *Manager) removeNamedLocked(name string) bool {
+	index, exists := m.named[name]
+	if !exists || index < 0 || index >= len(m.plugins) {
+		return false
+	}
+	m.plugins = append(m.plugins[:index], m.plugins[index+1:]...)
+	delete(m.named, name)
+	delete(m.namedOwners, name)
+	for registeredName, registeredIndex := range m.named {
+		if registeredIndex > index {
+			m.named[registeredName] = registeredIndex - 1
+		}
+	}
+	return true
 }
 
 // Publish enqueues a usage record for processing. If no plugin is registered
@@ -469,6 +551,22 @@ func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
 func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
+
+// RegisterNamedPluginOwned registers a named default plugin and returns its installation identity.
+func RegisterNamedPluginOwned(name string, plugin Plugin) NamedPluginRegistration {
+	return DefaultManager().RegisterNamedOwned(name, plugin)
+}
+
+// UnregisterNamedPlugin removes a named plugin from the default manager.
+func UnregisterNamedPlugin(name string) { DefaultManager().UnregisterNamed(name) }
+
+// UnregisterNamedPluginOwned removes a named default plugin only when registration is still current.
+func UnregisterNamedPluginOwned(registration NamedPluginRegistration) bool {
+	return DefaultManager().UnregisterNamedOwned(registration)
+}
+
+// RegisteredNamedPlugin returns the currently installed named default plugin.
+func RegisteredNamedPlugin(name string) Plugin { return DefaultManager().NamedPlugin(name) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }

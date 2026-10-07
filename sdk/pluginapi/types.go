@@ -510,18 +510,39 @@ type SchedulerOptions struct {
 
 // SchedulerAuthCandidate describes one auth candidate available to a scheduler.
 type SchedulerAuthCandidate struct {
-	// ID identifies the auth record.
+	// ID is the stable host auth identifier used for credential binding. It may
+	// contain an auth filename or account identifier such as an email address.
+	// Native plugins execute in-process and are trusted with this identifier.
 	ID string
 	// Provider identifies the auth provider.
 	Provider string
 	// Priority is the host priority assigned to the auth record.
 	Priority int
+	// Weight is the normalized host routing weight assigned to the auth record.
+	Weight int64
 	// Status is the current host-visible auth status.
 	Status string
-	// Attributes contains immutable routing and provider attributes.
+	// Attributes is reserved for bounded, host-derived routing attributes. The native
+	// host currently leaves it empty rather than forwarding auth attribute strings.
 	Attributes map[string]string
-	// Metadata contains mutable host-managed auth metadata.
+	// Metadata is reserved for explicitly plugin-safe host context. The native host
+	// does not populate it from auth metadata.
 	Metadata map[string]any
+	// Quota is a read-only snapshot of bounded, non-secret quota signals observed
+	// for the credential. The host clones the signal map before invoking plugins.
+	Quota SchedulerQuotaObservation
+	// ModelQuota is the requested model's quota observation when one is available.
+	// The host clones the signal map before invoking plugins.
+	ModelQuota *SchedulerQuotaObservation
+}
+
+// SchedulerQuotaObservation is a bounded, non-secret quota watermark collected by the host.
+// Signals contains only provider-specific values accepted by the host quota observer.
+type SchedulerQuotaObservation struct {
+	// ObservedAt is when Signals was collected from an upstream response.
+	ObservedAt time.Time
+	// Signals contains bounded quota watermark values. Treat this map as read-only.
+	Signals map[string]string
 }
 
 // SchedulerPickResponse returns a scheduler plugin routing decision.
@@ -882,6 +903,20 @@ type HostAffinityLookupResponse struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Unavailable reports whether the bound credential is currently unavailable.
 	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HostRoutingResetCooldownRequest asks the host to clear quota and cooldown routing state for one credential.
+type HostRoutingResetCooldownRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostRoutingResetCooldownResponse reports the credential whose quota and cooldown state was cleared.
+type HostRoutingResetCooldownResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Models lists the model keys whose routing state was reset.
+	Models []string `json:"models,omitempty"`
 }
 
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.

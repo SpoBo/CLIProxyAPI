@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -357,6 +358,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 				ID:         "auth-1",
 				Provider:   "openai",
 				Priority:   10,
+				Weight:     7,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "us"},
 			},
@@ -364,6 +366,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 				ID:         "auth-2",
 				Provider:   "codex",
 				Priority:   20,
+				Weight:     11,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "eu"},
 			},
@@ -395,6 +398,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 		if gotCandidate.ID != wantCandidate.ID ||
 			gotCandidate.Provider != wantCandidate.Provider ||
 			gotCandidate.Priority != wantCandidate.Priority ||
+			gotCandidate.Weight != wantCandidate.Weight ||
 			gotCandidate.Status != wantCandidate.Status ||
 			!reflect.DeepEqual(gotCandidate.Attributes, wantCandidate.Attributes) {
 			t.Fatalf("scheduler candidate[%d] = %#v, want %#v", index, gotCandidate, wantCandidate)
@@ -420,11 +424,20 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 				ID:         "auth-1",
 				Provider:   "openai",
 				Priority:   10,
+				Weight:     13,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "us"},
 				Metadata: map[string]any{
 					"keep": "candidate",
 					"drop": make(chan struct{}),
+				},
+				Quota: pluginapi.SchedulerQuotaObservation{
+					ObservedAt: time.Unix(100, 0).UTC(),
+					Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "42"},
+				},
+				ModelQuota: &pluginapi.SchedulerQuotaObservation{
+					ObservedAt: time.Unix(200, 0).UTC(),
+					Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "84"},
 				},
 			},
 		},
@@ -460,6 +473,7 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 	if gotCandidate.ID != wantCandidate.ID ||
 		gotCandidate.Provider != wantCandidate.Provider ||
 		gotCandidate.Priority != wantCandidate.Priority ||
+		gotCandidate.Weight != wantCandidate.Weight ||
 		gotCandidate.Status != wantCandidate.Status ||
 		!reflect.DeepEqual(gotCandidate.Attributes, wantCandidate.Attributes) {
 		t.Fatalf("scheduler candidate = %#v, want %#v", gotCandidate, wantCandidate)
@@ -469,5 +483,8 @@ func TestSanitizePluginRequestScheduler(t *testing.T) {
 	}
 	if _, ok := gotCandidate.Metadata["drop"]; ok {
 		t.Fatalf("scheduler candidate metadata drop survived sanitize: %#v", gotCandidate.Metadata)
+	}
+	if !reflect.DeepEqual(gotCandidate.Quota, wantCandidate.Quota) || !reflect.DeepEqual(gotCandidate.ModelQuota, wantCandidate.ModelQuota) {
+		t.Fatalf("scheduler candidate quota observations = %#v/%#v, want %#v/%#v", gotCandidate.Quota, gotCandidate.ModelQuota, wantCandidate.Quota, wantCandidate.ModelQuota)
 	}
 }

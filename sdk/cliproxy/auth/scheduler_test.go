@@ -1172,15 +1172,15 @@ func TestManagerPluginSchedulerAcrossPrioritiesAttributesAndCooldownFilter(t *te
 	if !okHigh {
 		t.Fatalf("missing high-act candidate")
 	}
-	if cHigh.Priority != 10 || cHigh.Attributes["weight"] != "100" {
-		t.Fatalf("high-act priority/weight mismatch: Priority=%d, weight=%s", cHigh.Priority, cHigh.Attributes["weight"])
+	if cHigh.Priority != 10 || cHigh.Weight != 100 || cHigh.Attributes != nil {
+		t.Fatalf("high-act priority/weight/attributes mismatch: Priority=%d, Weight=%d, Attributes=%#v", cHigh.Priority, cHigh.Weight, cHigh.Attributes)
 	}
 	cLow, okLow := candidateMap["low-act"]
 	if !okLow {
 		t.Fatalf("missing low-act candidate")
 	}
-	if cLow.Priority != 5 || cLow.Attributes["weight"] != "50" {
-		t.Fatalf("low-act priority/weight mismatch: Priority=%d, weight=%s", cLow.Priority, cLow.Attributes["weight"])
+	if cLow.Priority != 5 || cLow.Weight != 50 || cLow.Attributes != nil {
+		t.Fatalf("low-act priority/weight/attributes mismatch: Priority=%d, Weight=%d, Attributes=%#v", cLow.Priority, cLow.Weight, cLow.Attributes)
 	}
 }
 
@@ -1222,7 +1222,7 @@ func TestManagerPluginSchedulerAcrossPrioritiesMixedUnhandledFallsBackToHighestP
 	}
 }
 
-func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
+func TestManagerSelectAuthByKindRejectsPluginAPIKey(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.executors["codex"] = schedulerTestExecutor{}
 	for _, candidate := range []*Auth{
@@ -1241,11 +1241,8 @@ func TestManagerSelectAuthByKindSkipsAPIKey(t *testing.T) {
 	manager.SetPluginScheduler(scheduler)
 
 	selected, errSelect := manager.SelectAuthByKind(context.Background(), "codex", "", AuthKindOAuth, cliproxyexecutor.Options{})
-	if errSelect != nil {
-		t.Fatalf("SelectAuthByKind() error = %v", errSelect)
-	}
-	if selected == nil || selected.ID != "codex-oauth" {
-		t.Fatalf("SelectAuthByKind() auth = %#v, want codex-oauth", selected)
+	if errSelect == nil || selected != nil {
+		t.Fatalf("SelectAuthByKind() = %#v, %v; want invalid scheduler auth error", selected, errSelect)
 	}
 	if scheduler.calls != 1 {
 		t.Fatalf("scheduler.calls = %d, want 1", scheduler.calls)
@@ -1748,45 +1745,43 @@ func TestManagerPluginSchedulerErrorStopsPick(t *testing.T) {
 	}
 }
 
-func TestManagerPluginSchedulerFallsBackWhenUnhandledOrUnknown(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		resp    pluginapi.SchedulerPickResponse
-		handled bool
-	}{
-		{
-			name:    "unhandled",
-			resp:    pluginapi.SchedulerPickResponse{Handled: false},
-			handled: false,
-		},
-		{
-			name:    "unknown auth id",
-			resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"},
-			handled: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+func TestManagerPluginSchedulerFallsBackWhenUnhandled(t *testing.T) {
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	manager.SetPluginScheduler(&fakePluginScheduler{
+		resp:    pluginapi.SchedulerPickResponse{Handled: false},
+		handled: false,
+	})
+
+	got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil || got == nil || got.ID != "auth-a" {
+		t.Fatalf("pickNext() = %#v, %v; want unchanged native auth-a fallback", got, errPick)
+	}
+}
+
+func TestManagerPluginSchedulerInvalidAuthIDStopsPick(t *testing.T) {
+	for _, authID := range []string{"missing", " auth-a ", "   "} {
+		t.Run(authID, func(t *testing.T) {
 			manager := NewManager(nil, &FillFirstSelector{}, nil)
 			manager.executors["gemini"] = schedulerTestExecutor{}
-			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
-				t.Fatalf("Register(auth-b) error = %v", errRegister)
-			}
 			if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
 				t.Fatalf("Register(auth-a) error = %v", errRegister)
 			}
-
-			scheduler := &fakePluginScheduler{resp: tc.resp, handled: tc.handled}
-			manager.SetPluginScheduler(scheduler)
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				resp:    pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID},
+				handled: true,
+			})
 
 			got, _, errPick := manager.pickNext(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
-			if errPick != nil {
-				t.Fatalf("pickNext() error = %v", errPick)
-			}
-			if got == nil {
-				t.Fatalf("pickNext() auth = nil")
-			}
-			if got.ID != "auth-a" {
-				t.Fatalf("pickNext() auth.ID = %q, want %q", got.ID, "auth-a")
+			if errPick == nil || got != nil {
+				t.Fatalf("pickNext() = %#v, %v; want terminal invalid scheduler auth error", got, errPick)
 			}
 		})
 	}
@@ -2032,18 +2027,12 @@ func TestManagerPluginSchedulerCandidatesAreSafeCopies(t *testing.T) {
 			if candidate.ID != "auth-a" || candidate.Provider != "gemini" || candidate.Priority != 7 || candidate.Status != string(StatusActive) {
 				t.Fatalf("scheduler candidate = %#v, want sanitized auth-a metadata", candidate)
 			}
-			for _, key := range []string{"access_token", "api_key", "cookie"} {
-				if _, ok := candidate.Attributes[key]; ok {
-					t.Fatalf("scheduler candidate Attributes contains sensitive key %q", key)
-				}
-			}
-			if candidate.Attributes["priority"] != "7" {
-				t.Fatalf("scheduler candidate priority attribute = %q, want 7", candidate.Attributes["priority"])
+			if candidate.Attributes != nil {
+				t.Fatalf("scheduler candidate Attributes = %#v, want nil", candidate.Attributes)
 			}
 			if len(candidate.Metadata) != 0 {
 				t.Fatalf("scheduler candidate Metadata = %#v, want empty", candidate.Metadata)
 			}
-			candidate.Attributes["team"] = "mutated"
 			req.Candidates[0] = candidate
 			return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-a"}, true, nil
 		},

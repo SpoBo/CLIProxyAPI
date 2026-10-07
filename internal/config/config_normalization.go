@@ -1,11 +1,32 @@
 package config
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
+
+// ValidateRequiredSchedulerConfig verifies that a required scheduler can be considered for loading.
+// Capability registration is validated by the plugin host after loading.
+func (cfg *Config) ValidateRequiredSchedulerConfig() error {
+	if cfg == nil || strings.TrimSpace(cfg.Plugins.RequiredScheduler) == "" {
+		return nil
+	}
+	required := strings.TrimSpace(cfg.Plugins.RequiredScheduler)
+	if cfg.Home.Enabled {
+		return fmt.Errorf("required scheduler %q is incompatible with Home", required)
+	}
+	if !cfg.Plugins.Enabled {
+		return fmt.Errorf("required scheduler %q needs plugins.enabled", required)
+	}
+	item, ok := cfg.Plugins.Configs[required]
+	if !ok || item.Enabled == nil || !*item.Enabled {
+		return fmt.Errorf("required scheduler %q must be configured and enabled", required)
+	}
+	return nil
+}
 
 // NormalizePluginsConfig applies default plugin configuration values.
 func (cfg *Config) NormalizePluginsConfig() {
@@ -13,6 +34,7 @@ func (cfg *Config) NormalizePluginsConfig() {
 		return
 	}
 	cfg.Plugins.Dir = strings.TrimSpace(cfg.Plugins.Dir)
+	cfg.Plugins.RequiredScheduler = strings.TrimSpace(cfg.Plugins.RequiredScheduler)
 	if cfg.Plugins.Dir == "" {
 		cfg.Plugins.Dir = defaultPluginsDir
 	}

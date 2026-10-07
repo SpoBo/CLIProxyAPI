@@ -37,6 +37,9 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 	ctx, runCancel := context.WithCancel(ctx)
+	s.cfgMu.Lock()
+	s.antigravityContext = ctx
+	s.cfgMu.Unlock()
 	s.homeMu.Lock()
 	s.runCancel = runCancel
 	s.homeMu.Unlock()
@@ -48,6 +51,8 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		s.homeMu.Unlock()
 	}()
+
+	s.startModelCatalogUpdaters(ctx)
 
 	usage.StartDefault(ctx)
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
@@ -206,6 +211,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	if !homeEnabled {
+		go s.runAntigravityModelRefresh(ctx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -233,6 +241,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
 		if ctx == nil {
 			ctx = context.Background()
+		}
+
+		s.homeMu.Lock()
+		runCancel := s.runCancel
+		s.homeMu.Unlock()
+		if runCancel != nil {
+			runCancel()
 		}
 
 		s.homeLifecycleMu.Lock()
@@ -339,13 +354,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			if s.watcher != nil {
 				s.watcher.SetPluginAuthParser(nil)
 			}
-			s.pluginHost.ApplyConfig(ctx, &config.Config{})
-			s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
-			s.registerAvailableExecutors(ctx, executorRegistrationOptions{
-				includePlugins: true,
-			})
-			s.pluginHost.RegisterFrontendAuthProviders()
-			s.pluginHost.ShutdownAllContext(ctx)
+			if s.coreManager != nil {
+				s.coreManager.SetPluginScheduler(nil)
+			}
+			if errTeardown := s.pluginHost.TeardownContext(ctx); errTeardown != nil {
+				log.Errorf("failed to tear down plugin host: %v", errTeardown)
+				if shutdownErr == nil {
+					shutdownErr = errTeardown
+				}
+			}
+			if s.server != nil {
+				s.server.RefreshPluginManagementRoutes()
+			}
 			if s.accessManager != nil {
 				s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
 			}
@@ -372,4 +392,14 @@ func (s *Service) ensureAuthDir() error {
 		return fmt.Errorf("cliproxy: auth path exists but is not a directory: %s", s.cfg.AuthDir)
 	}
 	return nil
+}
+
+// startModelCatalogUpdaters applies the same catalog policy for SDK and CLI users.
+func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		registry.StartModelCatalogUpdaters(ctx, cfg.Models, cfg.Home.Enabled)
+	}
 }

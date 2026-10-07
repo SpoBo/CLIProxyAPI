@@ -213,6 +213,8 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		cooldownStateChanged bool
 	)
 
+	releaseMutation := m.lockAuthMutation(authID)
+	defer releaseMutation()
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if ok && auth != nil {
@@ -347,7 +349,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 					}
 					auth.Generation++
 					auth.UpdatedAt = now
-					if errPersist := m.persist(context.Background(), auth); errPersist != nil {
+					if errPersist := m.persistLocked(context.Background(), auth); errPersist != nil {
 						logEntryWithRequestID(ctx).WithField("auth_id", auth.ID).Warnf("failed to persist auth changes during model state reconciliation: %v", errPersist)
 					}
 				}
@@ -361,6 +363,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 		}
 	}
 	m.mu.Unlock()
+	releaseMutation()
 
 	if snapshot == nil {
 		return
@@ -781,47 +784,6 @@ func latestCandidateErrorForModel(auths []*Auth, selectionModelFunc func(*Auth) 
 	return latestAuthErr
 }
 
-func schedulerAttributeSensitive(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
-	normalized := strings.NewReplacer("-", "_", ".", "_", " ", "_").Replace(key)
-	compact := strings.NewReplacer("_", "", "-", "", ".", "", " ", "").Replace(key)
-	for _, fragment := range []string{
-		"api_key",
-		"apikey",
-		"token",
-		"secret",
-		"cookie",
-		"credential",
-		"password",
-		"storage",
-		"authorization",
-		"auth_header",
-		"proxy_url",
-	} {
-		if strings.Contains(key, fragment) || strings.Contains(normalized, fragment) || strings.Contains(compact, fragment) {
-			return true
-		}
-	}
-	return false
-}
-
-func schedulerSafeAttributes(src map[string]string) map[string]string {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(src))
-	for key, value := range src {
-		if schedulerAttributeSensitive(key) {
-			continue
-		}
-		out[key] = value
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func cloneSchedulerAnyMap(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
@@ -847,7 +809,19 @@ func cloneAuthSlice(auths []*Auth) []*Auth {
 	return out
 }
 
-func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+func schedulerQuotaObservation(provider string, quota QuotaState) pluginapi.SchedulerQuotaObservation {
+	observation := pluginapi.SchedulerQuotaObservation{ObservedAt: quota.ObservedAt}
+	if len(quota.Signals) > 0 {
+		headers := make(http.Header, len(quota.Signals))
+		for key, value := range quota.Signals {
+			headers.Set(key, value)
+		}
+		observation.Signals = collectQuotaSignals(provider, headers)
+	}
+	return observation
+}
+
+func schedulerAuthCandidates(auths []*Auth, model string) []pluginapi.SchedulerAuthCandidate {
 	if len(auths) == 0 {
 		return nil
 	}
@@ -856,13 +830,23 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 		if auth == nil {
 			continue
 		}
-		out = append(out, pluginapi.SchedulerAuthCandidate{
-			ID:         auth.ID,
-			Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
-			Priority:   authPriority(auth),
-			Status:     string(auth.Status),
-			Attributes: schedulerSafeAttributes(auth.Attributes),
-		})
+		candidate := pluginapi.SchedulerAuthCandidate{
+			ID:       auth.ID,
+			Provider: strings.ToLower(strings.TrimSpace(auth.Provider)),
+			Priority: authPriority(auth),
+			Weight:   authWeight(auth),
+			Status:   string(auth.Status),
+			Quota:    schedulerQuotaObservation(auth.Provider, auth.Quota),
+		}
+		modelKey := canonicalModelKey(model)
+		if state := auth.ModelStates[model]; state != nil {
+			observation := schedulerQuotaObservation(auth.Provider, state.Quota)
+			candidate.ModelQuota = &observation
+		} else if state := auth.ModelStates[modelKey]; state != nil {
+			observation := schedulerQuotaObservation(auth.Provider, state.Quota)
+			candidate.ModelQuota = &observation
+		}
+		out = append(out, candidate)
 	}
 	return out
 }
@@ -896,7 +880,6 @@ func schedulerOptions(opts cliproxyexecutor.Options) pluginapi.SchedulerOptions 
 }
 
 func pickSchedulerAuthByID(candidates []*Auth, authID string) *Auth {
-	authID = strings.TrimSpace(authID)
 	if authID == "" {
 		return nil
 	}
@@ -962,7 +945,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		Model:      model,
 		Stream:     opts.Stream,
 		Options:    schedulerOptions(opts),
-		Candidates: schedulerAuthCandidates(candidates),
+		Candidates: schedulerAuthCandidates(candidates, model),
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
@@ -982,8 +965,14 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		}
 		return nil, true, &Error{Code: rejectCode, Message: rejectMessage}
 	}
-	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
-		return selected, true, nil
+	if resp.AuthID != "" {
+		if resp.AuthID != strings.TrimSpace(resp.AuthID) {
+			return nil, true, &Error{Code: "scheduler_invalid_auth", Message: "scheduler returned a non-canonical credential identifier"}
+		}
+		if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
+			return selected, true, nil
+		}
+		return nil, true, &Error{Code: "scheduler_invalid_auth", Message: "scheduler returned an unavailable credential identifier"}
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)

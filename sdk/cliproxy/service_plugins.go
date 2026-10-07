@@ -105,7 +105,14 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	}
 
 	if s.pluginHost != nil {
-		s.pluginHost.ApplyConfig(ctx, cfg)
+		errApply := s.pluginHost.ApplyConfig(ctx, cfg)
+		if s.coreManager != nil {
+			s.coreManager.SetPluginScheduler(s.pluginHost)
+		}
+		if errApply != nil {
+			log.WithError(errApply).Error("failed to apply plugin runtime config")
+			return false
+		}
 	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
@@ -163,8 +170,9 @@ func (s *Service) refreshPluginModelRegistrations(ctx context.Context) {
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
 		return
 	}
+	// Native capability probes publish and refresh their scheduler entries
+	// asynchronously; startup and config updates must not wait for network I/O.
 	s.registerModelsForAuthBatch(ctx, s.coreManager.List())
-	s.waitAntigravityProbesContext(ctx)
 }
 
 func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) {

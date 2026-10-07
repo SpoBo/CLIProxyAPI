@@ -31,6 +31,89 @@ plugins: {}
 	}
 }
 
+func TestParseConfigBytes_RequiredScheduler(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte(`
+plugins:
+  enabled: true
+  required-scheduler: " quota-policy "
+  configs:
+    quota-policy:
+      enabled: true
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if cfg.Plugins.RequiredScheduler != "quota-policy" {
+		t.Fatalf("Plugins.RequiredScheduler = %q, want quota-policy", cfg.Plugins.RequiredScheduler)
+	}
+}
+
+func TestParseConfigBytes_RequiredSchedulerMustBeEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		yaml string
+	}{
+		{name: "plugins disabled", yaml: `plugins: {required-scheduler: quota-policy}`},
+		{name: "plugin config missing", yaml: `plugins: {enabled: true, required-scheduler: quota-policy}`},
+		{name: "plugin disabled", yaml: `
+plugins:
+  enabled: true
+  required-scheduler: quota-policy
+  configs:
+    quota-policy:
+      enabled: false
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, errParse := ParseConfigBytes([]byte(test.yaml))
+			if errParse == nil || !strings.Contains(errParse.Error(), "required scheduler") {
+				t.Fatalf("ParseConfigBytes() error = %v, want required scheduler validation error", errParse)
+			}
+		})
+	}
+}
+
+func TestValidateV8Config_RequiredSchedulerMustBeEnabled(t *testing.T) {
+	errValidate := ValidateV8Config([]byte(`
+config-version: 8
+plugins:
+  required-scheduler: quota-policy
+`))
+	if errValidate == nil || !strings.Contains(errValidate.Error(), "required scheduler") {
+		t.Fatalf("ValidateV8Config() error = %v, want required scheduler validation error", errValidate)
+	}
+}
+
+func TestParsedV8RequiredSchedulerRejectsHomeRuntime(t *testing.T) {
+	raw := []byte(`
+config-version: 8
+plugins:
+  enabled: true
+  required-scheduler: quota-policy
+  configs:
+    quota-policy:
+      enabled: true
+`)
+	if errValidate := ValidateV8Config(raw); errValidate != nil {
+		t.Fatalf("ValidateV8Config() error = %v, want valid scheduler config before Home overlay", errValidate)
+	}
+	cfg, errParse := ParseConfigBytes(raw)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	cfg.Home.Enabled = true
+	if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate == nil || !strings.Contains(errValidate.Error(), "Home") {
+		t.Fatalf("ValidateRequiredSchedulerConfig() error = %v, want Home incompatibility", errValidate)
+	}
+}
+
+func TestRequiredSchedulerValidationLeavesHomeWithoutPolicyUnchanged(t *testing.T) {
+	cfg := &Config{Home: HomeConfig{Enabled: true}}
+	if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+		t.Fatalf("ValidateRequiredSchedulerConfig() error = %v, want Home without required scheduler accepted", errValidate)
+	}
+}
+
 func TestParseConfigBytes_PluginsDirExpandsLeadingTilde(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

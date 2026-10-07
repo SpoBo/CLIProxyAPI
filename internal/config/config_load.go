@@ -160,6 +160,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	cfg.NormalizePluginsConfig()
+	if errValidate := cfg.ValidateRequiredSchedulerConfig(); errValidate != nil {
+		return nil, errValidate
+	}
 	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
 		return nil, errResolvePluginsDir
 	}

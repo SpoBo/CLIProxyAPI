@@ -53,6 +53,128 @@ func TestHostPickAuthUsesHighestPrioritySchedulerOnly(t *testing.T) {
 	}
 }
 
+func TestHostPickAuthUsesNamedRequiredScheduler(t *testing.T) {
+	var higherPriorityCalls int
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "other",
+			priority: 100,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				higherPriorityCalls++
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-other"}, nil
+			})}},
+		},
+		capabilityRecord{
+			id:       "quota-policy",
+			priority: 1,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-required"}, nil
+			})}},
+		},
+	)
+	host.Snapshot().requiredScheduler = "quota-policy"
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-required", "auth-other"))
+	if errPick != nil || !handled || resp.AuthID != "auth-required" {
+		t.Fatalf("PickAuth() = (%#v, %v, %v), want required scheduler auth", resp, handled, errPick)
+	}
+	if higherPriorityCalls != 0 {
+		t.Fatalf("higher-priority non-required scheduler calls = %d, want 0", higherPriorityCalls)
+	}
+}
+
+func TestHostPickAuthRequiredSchedulerMissingRejects(t *testing.T) {
+	host := newHostWithRecords()
+	host.snapshot.Store(&Snapshot{
+		enabled:                 true,
+		requiredScheduler:       "quota-policy",
+		quotaSupportedProviders: make(map[string][]string),
+	})
+
+	if !host.HasScheduler() {
+		t.Fatal("HasScheduler() = false, want true while required scheduler is unavailable")
+	}
+	_, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+	if !handled {
+		t.Fatal("PickAuth() handled = false, want true")
+	}
+	if errPick == nil || !strings.Contains(errPick.Error(), "required scheduler") {
+		t.Fatalf("PickAuth() error = %v, want required scheduler failure", errPick)
+	}
+}
+
+func TestHostPickAuthRequiredSchedulerRuntimeFailuresReject(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Host)
+		pick  schedulerFunc
+	}{
+		{
+			name: "fused",
+			setup: func(host *Host) {
+				host.fusePlugin("quota-policy", "test", "boom")
+			},
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "auth-1"}, nil
+			}),
+		},
+		{
+			name: "panic",
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				panic("boom")
+			}),
+		},
+		{
+			name: "error",
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, errors.New("scheduler failed")
+			}),
+		},
+		{
+			name: "unhandled",
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: false}, nil
+			}),
+		},
+		{
+			name: "invalid response",
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true}, nil
+			}),
+		},
+		{
+			name: "unknown auth id",
+			pick: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"}, nil
+			}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			host := newHostWithRecords(capabilityRecord{
+				id: "quota-policy",
+				plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+					Scheduler: test.pick,
+				}},
+			})
+			snap := host.Snapshot()
+			snap.requiredScheduler = "quota-policy"
+			if test.setup != nil {
+				test.setup(host)
+			}
+
+			_, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+			if !handled {
+				t.Fatal("PickAuth() handled = false, want true")
+			}
+			if errPick == nil {
+				t.Fatal("PickAuth() error = nil, want fail-closed rejection")
+			}
+		})
+	}
+}
+
 func TestHostPickAuthReturnsSchedulerError(t *testing.T) {
 	host := newHostWithRecords(capabilityRecord{
 		id: "scheduler",
@@ -128,10 +250,6 @@ func TestHostPickAuthInvalidResponseFallsBack(t *testing.T) {
 		resp pluginapi.SchedulerPickResponse
 	}{
 		{
-			name: "unknown auth id",
-			resp: pluginapi.SchedulerPickResponse{Handled: true, AuthID: "missing"},
-		},
-		{
 			name: "unknown delegate",
 			resp: pluginapi.SchedulerPickResponse{Handled: true, DelegateBuiltin: "unknown"},
 		},
@@ -156,6 +274,24 @@ func TestHostPickAuthInvalidResponseFallsBack(t *testing.T) {
 			}
 			if handled {
 				t.Fatal("PickAuth() handled = true, want false")
+			}
+		})
+	}
+}
+
+func TestHostPickAuthInvalidAuthIDRejectsWithoutFallback(t *testing.T) {
+	for _, authID := range []string{"missing", " auth-1 ", "   "} {
+		t.Run(authID, func(t *testing.T) {
+			host := newHostWithRecords(capabilityRecord{
+				id: "scheduler",
+				plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+					return pluginapi.SchedulerPickResponse{Handled: true, AuthID: authID}, nil
+				})}},
+			})
+
+			_, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+			if !handled || errPick == nil {
+				t.Fatalf("PickAuth() handled/error = %v/%v, want terminal invalid-auth error", handled, errPick)
 			}
 		})
 	}

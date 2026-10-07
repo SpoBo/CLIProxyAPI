@@ -32,9 +32,10 @@ type executorRegistration struct {
 }
 
 func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelProviderRegistry) {
-	if h == nil || manager == nil {
+	if h == nil || manager == nil || !h.lockApply(context.Background()) {
 		return
 	}
+	defer h.unlockApply()
 
 	snap := h.Snapshot()
 	records := h.activeRecordsFromSnapshot(snap)
@@ -87,7 +88,6 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 
 	seenProviders := make(map[string]struct{})
 	nextProviders := make(map[string]struct{})
-	nextModelClients := make(map[string]struct{})
 	executorRegistrations := make([]executorRegistration, 0)
 	modelClientRegistrations := make([]modelClientRegistration, 0)
 	for _, record := range records {
@@ -122,17 +122,16 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 				provider: provider,
 				models:   selectedModels[record.id],
 			})
-			nextModelClients[clientID] = struct{}{}
 		}
 	}
-	h.commitExecutorState(snap, manager, modelRegistry, providerModels, executorRegistrations, nextProviders, modelClientRegistrations, nextModelClients)
+	h.commitExecutorState(snap, manager, modelRegistry, providerModels, executorRegistrations, nextProviders, modelClientRegistrations)
 }
 
 func pluginExecutorModelClientID(pluginID, provider string) string {
 	return "plugin:" + pluginID + ":" + provider + ":executor"
 }
 
-func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, modelRegistry modelRegistry, providerModels map[string][]*registry.ModelInfo, registrations []executorRegistration, nextProviders map[string]struct{}, modelClientRegistrations []modelClientRegistration, nextModelClients map[string]struct{}) {
+func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, modelRegistry modelRegistry, providerModels map[string][]*registry.ModelInfo, registrations []executorRegistration, nextProviders map[string]struct{}, modelClientRegistrations []modelClientRegistration) {
 	if h == nil || manager == nil {
 		return
 	}
@@ -155,16 +154,8 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 		}
 	}
 	h.executorProviders = nextProviders
-	if nextModelClients == nil {
-		nextModelClients = make(map[string]struct{})
-	}
-	staleModelClients := make([]string, 0)
-	for clientID := range h.executorModelClientIDs {
-		if _, okClient := nextModelClients[clientID]; !okClient {
-			staleModelClients = append(staleModelClients, clientID)
-		}
-	}
-	h.executorModelClientIDs = nextModelClients
+	h.executorManager = manager
+	previousModelClients := h.executorModelRegistrations
 
 	for _, registration := range registrations {
 		if registration.adapter == nil || registration.provider == "" {
@@ -181,14 +172,31 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 	}
 	h.mu.Unlock()
 
-	if modelRegistry == nil {
+	nextOwned := make(map[string]modelClientOwnership, len(modelClientRegistrations))
+	if modelRegistry != nil {
+		for _, candidate := range modelClientRegistrations {
+			registration := modelRegistry.RegisterClientOwned(candidate.clientID, candidate.provider, candidate.models)
+			nextOwned[candidate.clientID] = modelClientOwnership{registry: modelRegistry, registration: registration}
+		}
+	}
+
+	h.mu.Lock()
+	if h.Snapshot() != snap {
+		h.mu.Unlock()
+		unregisterOwnedModelClients(nextOwned)
 		return
 	}
-	for _, registration := range modelClientRegistrations {
-		modelRegistry.RegisterClient(registration.clientID, registration.provider, registration.models)
+	h.executorModelRegistrations = nextOwned
+	if modelRegistry != nil {
+		h.modelRegistry = modelRegistry
 	}
-	for _, clientID := range staleModelClients {
-		modelRegistry.UnregisterClient(clientID)
+	h.mu.Unlock()
+
+	for clientID, ownership := range previousModelClients {
+		if _, stillOwned := nextOwned[clientID]; stillOwned {
+			continue
+		}
+		unregisterOwnedModelClient(ownership)
 	}
 }
 

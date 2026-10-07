@@ -392,32 +392,54 @@ func (h *Host) HasRequestInterceptors() bool {
 	return false
 }
 
-func (h *Host) commitModelClients(snap *Snapshot, modelRegistry modelRegistry, registrations []modelClientRegistration, nextClients map[string]struct{}, nextProviders map[string]string, nextModelRegistrations map[string]pluginModelRegistration) {
+func (h *Host) commitModelClients(snap *Snapshot, modelRegistry modelRegistry, registrations []modelClientRegistration, nextProviders map[string]string, nextModelRegistrations map[string]pluginModelRegistration) {
 	if h == nil || modelRegistry == nil {
 		return
 	}
 
-	staleClients := make([]string, 0)
 	h.mu.Lock()
 	if h.Snapshot() != snap {
 		h.mu.Unlock()
 		return
 	}
-	for clientID := range h.modelClientIDs {
-		if _, okClient := nextClients[clientID]; !okClient {
-			staleClients = append(staleClients, clientID)
-		}
-	}
-	h.modelClientIDs = nextClients
-	h.modelProviders = nextProviders
-	h.modelRegistrations = nextModelRegistrations
+	previous := h.modelClientRegistrations
 	h.mu.Unlock()
 
-	for _, registration := range registrations {
-		modelRegistry.RegisterClient(registration.clientID, registration.provider, registration.models)
+	nextOwned := make(map[string]modelClientOwnership, len(registrations))
+	for _, candidate := range registrations {
+		registration := modelRegistry.RegisterClientOwned(candidate.clientID, candidate.provider, candidate.models)
+		nextOwned[candidate.clientID] = modelClientOwnership{registry: modelRegistry, registration: registration}
 	}
-	for _, clientID := range staleClients {
-		modelRegistry.UnregisterClient(clientID)
+
+	h.mu.Lock()
+	if h.Snapshot() != snap {
+		h.mu.Unlock()
+		unregisterOwnedModelClients(nextOwned)
+		return
+	}
+	h.modelClientRegistrations = nextOwned
+	h.modelProviders = nextProviders
+	h.modelRegistrations = nextModelRegistrations
+	h.modelRegistry = modelRegistry
+	h.mu.Unlock()
+
+	for clientID, ownership := range previous {
+		if _, stillOwned := nextOwned[clientID]; stillOwned {
+			continue
+		}
+		unregisterOwnedModelClient(ownership)
+	}
+}
+
+func unregisterOwnedModelClients(owned map[string]modelClientOwnership) {
+	for _, ownership := range owned {
+		unregisterOwnedModelClient(ownership)
+	}
+}
+
+func unregisterOwnedModelClient(ownership modelClientOwnership) {
+	if ownership.registry != nil {
+		ownership.registry.UnregisterClientOwned(ownership.registration)
 	}
 }
 

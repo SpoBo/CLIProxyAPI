@@ -10,11 +10,18 @@ type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
 
+type ModelCatalogs = internalconfig.ModelCatalogs
+
+type ClientConfig = internalconfig.ClientConfig
+type CodexClientConfig = internalconfig.CodexClientConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig
 type DiscoveryConfig = internalconfig.DiscoveryConfig
 type DiscoveryInterfacesConfig = internalconfig.DiscoveryInterfacesConfig
+type PluginsConfig = internalconfig.PluginsConfig
+type PluginInstanceConfig = internalconfig.PluginInstanceConfig
+type RestartRequiredError = internalconfig.RestartRequiredError
 type RemoteManagement = internalconfig.RemoteManagement
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type OAuthModelSetting = internalconfig.OAuthModelSetting
@@ -41,6 +48,8 @@ type TLS = internalconfig.TLSConfig
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
 )
+
+var ErrRestartRequired = internalconfig.ErrRestartRequired
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 

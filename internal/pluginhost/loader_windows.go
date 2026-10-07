@@ -91,7 +91,7 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	}
 	id := windowsHostCallbackID.Add(1)
 	instance := &hostCallbackInstance{}
-	host.registerHostCallbackInstance(file.ID, instance)
+	host.registerHostCallbackInstanceForRequest(file.loadRequest, instance)
 	hostCtx := new(uintptr)
 	*hostCtx = id
 	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})

@@ -8,6 +8,7 @@ import (
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +29,7 @@ type OAuthModelAlias struct {
 type RuntimeConfig struct {
 	Enabled             bool
 	Dir                 string
+	RequiredScheduler   string
 	AuthDir             string
 	ProxyURL            string
 	ForceModelPrefix    bool
@@ -63,31 +65,51 @@ type Host struct {
 	inner *internalpluginhost.Host
 }
 
+// ErrInvalidHost reports an operation attempted on a nil or uninitialized host.
+var ErrInvalidHost = internalpluginhost.ErrInvalidHost
+
 // New creates a plugin host.
 func New() *Host {
 	return &Host{inner: internalpluginhost.New()}
 }
 
-// ApplyConfig applies plugin runtime configuration.
+// ApplyConfig applies plugin runtime configuration. It preserves the original no-result
+// SDK signature; callers that need startup validation must use ApplyConfigWithError.
+// Once a required scheduler is active, equivalent plugin configuration is a no-op;
+// changing that protected runtime requires a restart.
 func (h *Host) ApplyConfig(ctx context.Context, cfg RuntimeConfig) {
+	if errApply := h.ApplyConfigWithError(ctx, cfg); errApply != nil {
+		log.WithError(errApply).Error("pluginhost: failed to apply runtime configuration")
+	}
+}
+
+// ApplyConfigWithError applies plugin runtime configuration and reports validation,
+// discovery, required-scheduler, and context failures to checked callers.
+func (h *Host) ApplyConfigWithError(ctx context.Context, cfg RuntimeConfig) error {
 	if h == nil || h.inner == nil {
-		return
+		return ErrInvalidHost
 	}
 	internalCfg := runtimeConfigToInternalConfig(cfg)
-	h.inner.ApplyConfig(ctx, internalCfg)
+	return h.inner.ApplyConfig(ctx, internalCfg)
 }
 
 // ShutdownAll unloads every active plugin.
 func (h *Host) ShutdownAll() {
-	h.ShutdownAllContext(context.Background())
+	_ = h.TeardownContext(context.Background())
 }
 
 // ShutdownAllContext detaches every active plugin and bounds waiting for active calls by ctx.
 func (h *Host) ShutdownAllContext(ctx context.Context) {
+	_ = h.TeardownContext(ctx)
+}
+
+// TeardownContext detaches all capabilities and registrations, unloads clients,
+// and resets the host so a fresh required runtime can be started.
+func (h *Host) TeardownContext(ctx context.Context) error {
 	if h == nil || h.inner == nil {
-		return
+		return ErrInvalidHost
 	}
-	h.inner.ShutdownAllContext(ctx)
+	return h.inner.TeardownContext(ctx)
 }
 
 // PluginBusy reports whether a plugin dynamic library is loaded or being loaded.
@@ -192,7 +214,8 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return h.inner.PickAuth(ctx, req)
 }
 
-// HasScheduler reports whether any active plugin provides a scheduler.
+// HasScheduler reports whether an active plugin provides a scheduler or a configured
+// required scheduler is unavailable and therefore keeps selection fail-closed.
 func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
@@ -221,9 +244,10 @@ func runtimeConfigToInternalConfig(cfg RuntimeConfig) *internalconfig.Config {
 		OAuthExcludedModels: cloneStringSliceMap(cfg.OAuthExcludedModels),
 		OAuthModelAlias:     oauthModelAliasToInternal(cfg.OAuthModelAlias),
 		Plugins: internalconfig.PluginsConfig{
-			Enabled: cfg.Enabled,
-			Dir:     cfg.Dir,
-			Configs: pluginConfigsToInternal(cfg.Configs),
+			Enabled:           cfg.Enabled,
+			Dir:               cfg.Dir,
+			RequiredScheduler: cfg.RequiredScheduler,
+			Configs:           pluginConfigsToInternal(cfg.Configs),
 		},
 	}
 	out.NormalizePluginsConfig()

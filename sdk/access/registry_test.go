@@ -18,6 +18,41 @@ func (p testProvider) Authenticate(context.Context, *http.Request) (*Result, *Au
 	return &Result{Provider: p.id, Principal: p.id}, nil
 }
 
+func TestOwnedProviderRegistrationsDoNotRemoveReplacement(t *testing.T) {
+	const key = "owned-test"
+	UnregisterProvider(key)
+	ClearExclusiveProvider()
+	defer UnregisterProvider(key)
+	defer ClearExclusiveProvider()
+
+	first := testProvider{id: "first"}
+	second := testProvider{id: "second"}
+	firstRegistration := RegisterProviderOwned(key, first)
+	firstExclusive := SetExclusiveProviderOwned(firstRegistration)
+	secondRegistration := RegisterProviderOwned(key, second)
+	if staleExclusive := SetExclusiveProviderOwned(firstRegistration); ClearExclusiveProviderOwned(staleExclusive) {
+		t.Fatal("stale provider registration claimed the exclusive slot")
+	}
+	secondExclusive := SetExclusiveProviderOwned(secondRegistration)
+
+	if UnregisterProviderOwned(firstRegistration) {
+		t.Fatal("stale provider registration removed its replacement")
+	}
+	if ClearExclusiveProviderOwned(firstExclusive) {
+		t.Fatal("stale exclusive registration cleared its replacement")
+	}
+	providers := RegisteredProviders()
+	if len(providers) != 1 || providers[0].Identifier() != "second" {
+		t.Fatalf("registered providers = %#v, want second replacement", providers)
+	}
+	if !ClearExclusiveProviderOwned(secondExclusive) {
+		t.Fatal("current exclusive registration was not cleared")
+	}
+	if !UnregisterProviderOwned(secondRegistration) {
+		t.Fatal("current provider registration was not removed")
+	}
+}
+
 func TestRegisteredProvidersReturnsOnlyExclusiveProvider(t *testing.T) {
 	UnregisterProvider("test-a")
 	UnregisterProvider("test-b")

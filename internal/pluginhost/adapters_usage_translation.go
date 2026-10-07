@@ -17,28 +17,50 @@ import (
 )
 
 func (h *Host) RegisterUsagePlugins() {
-	if h == nil {
+	if h == nil || !h.lockApply(context.Background()) {
 		return
 	}
+	defer h.unlockApply()
+	h.registerUsagePluginsLocked()
+}
 
+func (h *Host) registerUsagePluginsLocked() {
+	nextNames := make(map[string]struct{})
+	nextRegistrations := make(map[string]coreusage.NamedPluginRegistration)
 	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.UsagePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		coreusage.RegisterNamedPlugin("plugin:"+record.id, &usageAdapter{
+		name := "plugin:" + record.id
+		nextRegistrations[name] = coreusage.RegisterNamedPluginOwned(name, &usageAdapter{
 			host:     h,
 			pluginID: record.id,
 			plugin:   plugin,
 		})
+		nextNames[name] = struct{}{}
+	}
+	h.mu.Lock()
+	previousRegistrations := h.usagePluginRegistrations
+	h.usagePluginNames = nextNames
+	h.usagePluginRegistrations = nextRegistrations
+	h.mu.Unlock()
+	for _, registration := range previousRegistrations {
+		coreusage.UnregisterNamedPluginOwned(registration)
 	}
 }
 
 func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
-	thinking.ClearPluginProviders()
 	if h == nil {
 		return
 	}
+	type registration struct {
+		owner    string
+		provider string
+		priority int
+		applier  *thinkingAdapter
+	}
+	registrations := make([]registration, 0, len(records))
 	for _, record := range records {
 		applier := record.plugin.Capabilities.ThinkingApplier
 		if applier == nil || h.isPluginFused(record.id) {
@@ -48,15 +70,46 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		if !okProvider {
 			continue
 		}
-		thinking.RegisterPluginProvider(record.id, provider, record.priority, &thinkingAdapter{
-			host:     h,
-			pluginID: record.id,
-			path:     record.path,
-			version:  record.version,
+		registrations = append(registrations, registration{
+			owner:    record.id,
 			provider: provider,
-			applier:  applier,
+			priority: record.priority,
+			applier: &thinkingAdapter{
+				host:     h,
+				pluginID: record.id,
+				path:     record.path,
+				version:  record.version,
+				provider: provider,
+				applier:  applier,
+			},
 		})
 	}
+
+	h.mu.Lock()
+	previousRegistrations := h.thinkingProviderRegistrations
+	h.thinkingProviderOwners = make(map[string]struct{})
+	h.thinkingProviderRegistrations = make(map[string][]thinking.PluginProviderRegistration)
+	h.mu.Unlock()
+	for _, owned := range previousRegistrations {
+		for _, token := range owned {
+			thinking.UnregisterPluginProviderOwned(token)
+		}
+	}
+
+	nextOwners := make(map[string]struct{})
+	nextRegistrations := make(map[string][]thinking.PluginProviderRegistration)
+	for _, item := range registrations {
+		token, registered := thinking.RegisterPluginProviderOwned(item.owner, item.provider, item.priority, item.applier)
+		if !registered {
+			continue
+		}
+		nextOwners[item.owner] = struct{}{}
+		nextRegistrations[item.owner] = append(nextRegistrations[item.owner], token)
+	}
+	h.mu.Lock()
+	h.thinkingProviderOwners = nextOwners
+	h.thinkingProviderRegistrations = nextRegistrations
+	h.mu.Unlock()
 }
 
 func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi.ThinkingApplier) (provider string, ok bool) {
@@ -99,8 +152,13 @@ func (h *Host) fusePlugin(id, method string, recovered any) {
 	}
 	h.mu.Lock()
 	h.fused[id] = fmt.Sprintf("%s panic: %v", method, recovered)
+	registrations := h.thinkingProviderRegistrations[id]
+	delete(h.thinkingProviderRegistrations, id)
+	delete(h.thinkingProviderOwners, id)
 	h.mu.Unlock()
-	thinking.UnregisterPluginProviders(id)
+	for _, registration := range registrations {
+		thinking.UnregisterPluginProviderOwned(registration)
+	}
 	log.WithField("plugin_id", id).WithField("method", method).Errorf("pluginhost: plugin panic recovered: %v\n%s", recovered, debug.Stack())
 }
 

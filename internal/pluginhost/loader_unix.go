@@ -141,7 +141,7 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 	}
 	id := hostCallbackID.Add(1)
 	instance := &hostCallbackInstance{}
-	host.registerHostCallbackInstance(file.ID, instance)
+	host.registerHostCallbackInstanceForRequest(file.loadRequest, instance)
 	*(*C.uintptr_t)(hostCtx) = C.uintptr_t(id)
 	hostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	C.cliproxy_set_host_api(hostAPI, C.uint32_t(pluginHostABIVersion), hostCtx)
